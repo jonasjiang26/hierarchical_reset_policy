@@ -94,7 +94,7 @@ class GroundedSAM:
         for i in range(boxes.size(0)):
             boxes[i] = boxes[i] * torch.Tensor([W, H, W, H])
             boxes[i][:2] -= boxes[i][2:] / 2
-            boxes[i][2:] += boxes[i][:2]
+            boxes[i][2:] = boxes[i][:2] + boxes[i][2:]
 
         boxes = boxes.cpu()
         transformed_boxes = predictor.transform.apply_boxes_torch(boxes, image.shape[:2]).to(device)

@@ -23,11 +23,11 @@ class SceneGraphServer:
         # """Example callback for image data."""
         try:
             self.latest_frame = frame
-            self.frame_count += 1
+            # self.frame_count += 1
 
             if not self.mask_requested:
-                if self.frame_count == 1 or self.frame_count % 100 == 0:
-                    pyzlc.info(f"Cached static_cam frame #{self.frame_count}")
+            #     if self.frame_count == 1 or self.frame_count % 100 == 0:
+            #         pyzlc.info(f"Cached static_cam frame #{self.frame_count}")
                 return None
 
             self.mask_requested = False
@@ -53,21 +53,22 @@ class SceneGraphServer:
 
         masks, phrases = self.grounded_sam.segment(self.grounded_sam.model,
                                                     rgb,
-                                                    "banana. bowl.",
+                                                    "banana.",
                                                     0.3,
                                                     0.3,
                                                     "cuda:0")
         pyzlc.info(f"Detected phrases: {phrases}")
-
+        pyzlc.info(f"Number of masks detected: {masks.shape[0]}")
         if masks.shape[0] == 0:
-            pyzlc.warning("No masks detected for prompt: banana. bowl.")
+            pyzlc.warning("No masks detected for prompt: banana.")
             return {"success": False, "message": "no masks detected"}
 
         mask = masks[0, 0].detach().cpu().numpy().astype(np.uint8) * 255
+        pyzlc.info(f"Mask stats: min={mask.min()}, max={mask.max()}, sum={int(mask.sum())}")
         mask_saved = cv2.imwrite("/tmp/scene_graph_mask.png", mask)
         pyzlc.info(f"Saved first mask to /tmp/scene_graph_mask.png: {mask_saved}")
         cv2.imshow("masks", mask)
-        cv2.waitKey(1)
+        cv2.waitKey(0)
         return {"success": True, "phrases": phrases}
 
     def send_scene_graph(self, request):
