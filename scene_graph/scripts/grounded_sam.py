@@ -84,9 +84,17 @@ class GroundedSAM:
 
         return boxes_filt, pred_phrases
 
-    def segment(self, model, image: np.ndarray, prompt: str, box_threshold, text_threshold, device):
+    def segment(self, model, image: np.ndarray, prompt: str, box_threshold, text_threshold, device, with_logits=True):
         image_pil, image_tensor = self.load_image(image)
-        boxes, phrases = self.get_grounding_output(model, image_tensor, prompt, box_threshold, text_threshold, device=device)
+        boxes, phrases = self.get_grounding_output(
+            model,
+            image_tensor,
+            prompt,
+            box_threshold,
+            text_threshold,
+            with_logits=with_logits,
+            device=device,
+        )
         predictor = SamPredictor(sam_model_registry[SAM_VERSION](checkpoint=SAM_CHECKPOINT_PATH).to(device))
         predictor.set_image(image)
         size = image_pil.size

@@ -1,7 +1,8 @@
 import pyzlc
 import numpy as np
-from typing import Any
+from typing import Any, Dict, List
 from grounded_sam import GroundedSAM
+from instance import TableInstance
 import cv2
 import traceback
 
@@ -11,15 +12,66 @@ class SceneGraphServer:
         pyzlc.init("scene_graph", "141.3.53.25", "robot_lab_robotiq_202", group_port=7725)
 
         pyzlc.info("scene_graph initialized and ready to receive requests.")
-        self.mask_requested = False
+        self.requested = False
         self.latest_frame = None
         self.frame_count = 0
+        self.prompt = "banana. table. gripper. pen."
+        self.wrist_instances: List[TableInstance] = []
+        self.static_instances: List[TableInstance] = []
         pyzlc.info("Forcing static_cam subscriber to use TCP transport.")
         pyzlc.get_node("robot_lab_robotiq_202").subscriber_manager.local_ip = ""
-        pyzlc.register_subscriber_handler("static_cam", self.image_callback, "robot_lab_robotiq_202")
+        # pyzlc.register_subscriber_handler("wrist_cam", self.image_callback, "robot_lab_robotiq_202")
+        pyzlc.register_subscriber_handler("static_cam", self.static_cam_callback, "robot_lab_robotiq_202")
+
         self.grounded_sam = GroundedSAM()
 
-    def image_callback(self, frame):
+    def static_cam_callback(self, frame):
+        # """Example callback for image data."""
+        try:
+            # self.latest_frame = frame
+
+            if not self.requested:
+                return None
+
+            self.requested = False
+            masks, phrases = self.process_frame(frame)
+            pyzlc.info(f"Processed static_cam frame")
+            if masks is None:
+                return {"success": False, "message": "no masks detected"}
+
+            for mask, phrase in zip(masks, phrases):
+                if phrase:
+                    instance = TableInstance(
+                        phrase,
+                        mask,
+                        rgb=frame['rgb_data'],
+                        depth=frame['depth_data'],
+                        width=frame['width'],
+                        height=frame['height'],
+                        channels=frame['channels'],
+                    )
+                    self.static_instances.append(instance)
+            pyzlc.info(f"created {len(self.static_instances)} instances.")
+            for instance in self.static_instances:
+                if instance.name == "pen":
+                    pyzlc.info(f"Visualizing segmented point cloud for instance: {instance.name}")
+                    instance.segmented_point_cloud_in_base(visualize=True, depth_trunc=10.0)
+            # rgb_example = self.static_instances[0].segment_rgb()
+            # self.latest_frame = rgb_example
+            # cv2.imshow("Static Instance RGB", rgb_example)
+            # cv2.waitKey(0)
+
+            return {
+                "success": True,
+                "phrases": phrases,
+                "num_masks": len(phrases),
+            }
+        except Exception as exc:
+            pyzlc.error(f"static_cam_callback failed: {exc}")
+            pyzlc.error(traceback.format_exc())
+            return {"success": False, "message": str(exc)}
+            
+    def wrist_cam_callback(self, frame):
         # """Example callback for image data."""
         try:
             self.latest_frame = frame
@@ -31,11 +83,27 @@ class SceneGraphServer:
                 return None
 
             self.mask_requested = False
-            return self.process_frame(frame)
+            masks, phrases = self.process_frame(frame) 
+            if masks is None:
+                return {"success": False, "message": "no masks detected"}
+
+            for mask, phrase in zip(masks, phrases):
+                instance = TableInstance(
+                    phrase,
+                    mask,
+                    rgb=frame['rgb_data'],
+                    depth=frame['depth_data'],
+                    width=frame['width'],
+                    height=frame['height'],
+                    channels=frame['channels'],
+                )
+                self.wrist_instances.append(instance)
+            return None
         except Exception as exc:
-            pyzlc.error(f"image_callback failed: {exc}")
+            pyzlc.error(f"wrist_cam_callback failed: {exc}")
             pyzlc.error(traceback.format_exc())
             return {"success": False, "message": str(exc)}
+
 
     def process_frame(self, frame):
         pyzlc.info(f"Processing static_cam frame #{self.frame_count}")
@@ -48,41 +116,44 @@ class SceneGraphServer:
         pyzlc.info(f"Image shape: width={width}, height={height}, channels={channels}")
 
         rgb = np.frombuffer(rgb_data, dtype=np.uint8).reshape((height, width, channels))
-        rgb_saved = cv2.imwrite("/tmp/scene_graph_rgb.png", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
-        pyzlc.info(f"Saved latest RGB frame to /tmp/scene_graph_rgb.png: {rgb_saved}")
 
         masks, phrases = self.grounded_sam.segment(self.grounded_sam.model,
                                                     rgb,
-                                                    "banana.",
+                                                    self.prompt,
+                                                    0.2,
                                                     0.3,
-                                                    0.3,
-                                                    "cuda:0")
+                                                    "cuda:0",
+                                                    with_logits=False)
         pyzlc.info(f"Detected phrases: {phrases}")
         pyzlc.info(f"Number of masks detected: {masks.shape[0]}")
         if masks.shape[0] == 0:
-            pyzlc.warning("No masks detected for prompt: banana.")
-            return {"success": False, "message": "no masks detected"}
+            pyzlc.warning(f"No masks detected for prompt: {self.prompt}")
+            return None, []
 
-        mask = masks[0, 0].detach().cpu().numpy().astype(np.uint8) * 255
-        pyzlc.info(f"Mask stats: min={mask.min()}, max={mask.max()}, sum={int(mask.sum())}")
-        mask_saved = cv2.imwrite("/tmp/scene_graph_mask.png", mask)
-        pyzlc.info(f"Saved first mask to /tmp/scene_graph_mask.png: {mask_saved}")
-        cv2.imshow("masks", mask)
-        cv2.waitKey(0)
-        return {"success": True, "phrases": phrases}
+        #filter out empty phrases and corresponding masks
+        valid_indices = [i for i, phrase in enumerate(phrases) if phrase.strip()]
+        phrases = [phrases[i] for i in valid_indices]
+        masks = masks[valid_indices]
+        
+        return masks, phrases
 
     def send_scene_graph(self, request):
 
         pyzlc.info(f"Received request: {request}")
         if self.latest_frame is None:
-            self.mask_requested = True
+            self.requested = True 
             return {
                 "success": False,
                 "message": "no static_cam frame received yet; will process the next frame",
                 "static_cam_frames_seen": self.frame_count,
             }
 
-        return self.process_frame(self.latest_frame)
+        cv2.imshow("Latest Frame", self.latest_frame)
+        cv2.waitKey(1)
+
+        return {
+            "success": True
+        }
 
 if __name__ == "__main__":
     server = SceneGraphServer()
