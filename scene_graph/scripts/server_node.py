@@ -1,4 +1,5 @@
 import pyzlc
+import cv2
 import numpy as np
 import open3d as o3d
 from pathlib import Path
@@ -6,6 +7,7 @@ from typing import List
 from grounded_sam import GroundedSAM
 from instance import TableInstance
 import traceback
+from heuristics import TableSceneHeuristics
 
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs"
 WRIST_CAM_CONFIG = CONFIG_DIR / "wrist_cam_hand_eye.yaml"
@@ -25,7 +27,7 @@ class SceneGraphServer:
         self.static_processed_for_request = False
         self.wrist_processed_for_request = False
         self.fused_point_cloud = None
-        self.prompt = "yellow. banana. red bowl."
+        self.prompt = "wash sponge. bowl."
         self.wrist_instances: List[TableInstance] = []
         self.static_instances: List[TableInstance] = []
         self.fused_instances: List[TableInstance] = []
@@ -156,7 +158,7 @@ class SceneGraphServer:
                                                     rgb,
                                                     self.prompt,
                                                     0.1,
-                                                    0.1,
+                                                    0.35,
                                                     "cuda:0",
                                                     with_logits=False)
         pyzlc.info(f"Detected phrases: {phrases}")
@@ -169,8 +171,50 @@ class SceneGraphServer:
         valid_indices = [i for i, phrase in enumerate(phrases) if phrase.strip()]
         phrases = [phrases[i] for i in valid_indices]
         masks = masks[valid_indices]
+        # self.visualize_masks(rgb, masks, phrases, frame.get("timestamp", "latest"))
         
         return masks, phrases
+
+    def visualize_masks(self, rgb, masks, phrases, timestamp):
+        overlay = rgb.copy()
+        colors = [
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+            (255, 255, 0),
+            (255, 0, 255),
+            (0, 255, 255),
+        ]
+
+        for index, (mask, phrase) in enumerate(zip(masks, phrases)):
+            if hasattr(mask, "detach"):
+                mask = mask.detach().cpu().numpy()
+            mask = np.asarray(mask)
+            if mask.ndim == 3 and mask.shape[0] == 1:
+                mask = mask[0]
+            mask = mask.astype(bool)
+
+            color = np.asarray(colors[index % len(colors)], dtype=np.uint8)
+            overlay[mask] = (0.55 * overlay[mask] + 0.45 * color).astype(np.uint8)
+
+            ys, xs = np.where(mask)
+            if len(xs) > 0:
+                cv2.putText(
+                    overlay,
+                    phrase,
+                    (int(xs.min()), int(ys.min()) - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    tuple(int(c) for c in color.tolist()),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+        try:
+            cv2.imshow("GroundedSAM masks", cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+            cv2.waitKey(0)
+        except Exception as exc:
+            pyzlc.warning(f"Could not show mask debug window: {exc}")
 
     def send_scene_graph(self, request):
 
@@ -198,40 +242,57 @@ class SceneGraphServer:
                 visualize=False,
                 depth_trunc=10.0,
             )
+            instance.segemtned_point_cloud = instance.segmented_point_cloud
 
     def _try_fuse_instances(self):
         if not self.static_processed_for_request or not self.wrist_processed_for_request:
             return
 
         self.fused_instances = []
-        wrist_instances_by_name = {
-            self._instance_key(instance.name): instance
-            for instance in self.wrist_instances
-            if hasattr(instance, "segmented_point_cloud")
-        }
+        instances_by_key = self._group_projected_instances_by_key(
+            self.static_instances + self.wrist_instances
+        )
 
-        for static_instance in self.static_instances:
-            if not hasattr(static_instance, "segmented_point_cloud"):
-                continue
+        for key, instances in sorted(instances_by_key.items()):
+            fused_instance = instances[0]
+            fused_pcd = None
 
-            wrist_instance = wrist_instances_by_name.get(self._instance_key(static_instance.name))
-            if wrist_instance is None:
-                continue
+            for instance in instances:
+                fused_pcd = fused_instance.fuse_projected_point_clouds(
+                    fused_pcd,
+                    instance.segmented_point_cloud,
+                    visualize=False,
+                )
 
-            pyzlc.info(f"Fusing segmented point cloud for instance: {static_instance.name}")
-            static_instance.segmented_point_cloud = static_instance.fuse_projected_point_clouds(
-                static_instance.segmented_point_cloud,
-                wrist_instance.segmented_point_cloud,
-                visualize=False,
-            )
-            self.fused_instances.append(static_instance)
+            fused_instance.segmented_point_cloud = fused_pcd
+            self.fused_instances.append(fused_instance)
+            pyzlc.info(f"Fused {len(instances)} point cloud(s) for instance name: {key}")
 
         if len(self.fused_instances) == 0:
-            pyzlc.warning("No matching static_cam and wrist_cam instances were available to fuse.")
+            pyzlc.warning("No projected static_cam or wrist_cam instances were available to visualize.")
         else:
-            self._visualize_all_fused_point_clouds()
+            for instance in self.fused_instances:
+                for chosen_instance in self.fused_instances:
+                    if chosen_instance.name != instance.name:
+                        if TableSceneHeuristics().is_in(instance, chosen_instance):
+                            pyzlc.info(f"{instance.name} is in {chosen_instance.name}.")
+                            continue
+
+                        relation = TableSceneHeuristics().get_spatial_relation(instance, chosen_instance)
+                        pyzlc.info(f"Spatial relation: {relation}")
+
+                # self._visualize_all_fused_point_clouds()
 
         self.requested = False
+
+    def _group_projected_instances_by_key(self, instances):
+        instances_by_key = {}
+        for instance in instances:
+            if not hasattr(instance, "segmented_point_cloud"):
+                continue
+            key = self._instance_key(instance.name)
+            instances_by_key.setdefault(key, []).append(instance)
+        return instances_by_key
 
     def _instance_key(self, name):
         return name.strip().lower().rstrip(".")
