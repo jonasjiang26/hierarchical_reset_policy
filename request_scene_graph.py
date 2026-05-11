@@ -27,7 +27,6 @@ def main() -> None:
 
     request = {
         "command": "start_scene_graph",
-        "subscriber": "static_cam",
     }
     pyzlc.info(f"Sending request: {request}")
 
