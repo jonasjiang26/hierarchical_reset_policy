@@ -26,10 +26,12 @@ def main() -> None:
         return
 
     request = {
-        "command": "start_scene_graph",
+        "prompt": "sponge. bowl.",
+        # "goal_key": "wash sponge.",
     }
     pyzlc.info(f"Sending request: {request}")
 
+    pyzlc.sleep(15)  # Ensure the server is ready to receive the request
     request_fn = getattr(pyzlc, "call", None) or getattr(pyzlc, "zlc_request")
     response = request_fn(
         args.service_name,

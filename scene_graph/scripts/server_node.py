@@ -27,14 +27,17 @@ class SceneGraphServer:
         self.static_processed_for_request = False
         self.wrist_processed_for_request = False
         self.fused_point_cloud = None
-        self.prompt = "wash sponge. bowl."
+        self.prompt = str
+        self.active_request_id = ""
+        self.completed_request_id = ""
+        self.spatial_relation = ""
         self.wrist_instances: List[TableInstance] = []
         self.static_instances: List[TableInstance] = []
         self.fused_instances: List[TableInstance] = []
         pyzlc.info("Forcing static_cam subscriber to use TCP transport.")
         pyzlc.get_node("robot_lab_robotiq_202").subscriber_manager.local_ip = ""
         pyzlc.register_subscriber_handler("static_cam", self.static_cam_callback, "robot_lab_robotiq_202")
-        pyzlc.register_subscriber_handler("wrist_cam", self.wrist_cam_callback, "robot_lab_robotiq_202")
+        pyzlc.register_subscriber_handler("wrist_cam", self.wrist_cam_callback, "robot_lab_robotiq_202") 
         pyzlc.register_subscriber_handler("FrankaPanda/franka_arm_state", self.panda_arm_state_callback, "robot_lab_robotiq_202")
         self.grounded_sam = GroundedSAM()
 
@@ -157,7 +160,7 @@ class SceneGraphServer:
         masks, phrases = self.grounded_sam.segment(self.grounded_sam.model,
                                                     rgb,
                                                     self.prompt,
-                                                    0.1,
+                                                    0.3,
                                                     0.35,
                                                     "cuda:0",
                                                     with_logits=False)
@@ -175,7 +178,7 @@ class SceneGraphServer:
         
         return masks, phrases
 
-    def visualize_masks(self, rgb, masks, phrases, timestamp):
+    # def visualize_masks(self, rgb, masks, phrases, timestamp):
         overlay = rgb.copy()
         colors = [
             (255, 0, 0),
@@ -219,19 +222,46 @@ class SceneGraphServer:
     def send_scene_graph(self, request):
 
         pyzlc.info(f"Received request: {request}")
-        self.requested = True
-        self.static_processed_for_request = False
-        self.wrist_processed_for_request = False
-        self.static_instances = []
-        self.wrist_instances = []
-        self.fused_instances = []
-        self.fused_point_cloud = None
+        request_id = str(request.get("request_id", ""))
+        if request_id != self.active_request_id:
+            self.active_request_id = request_id
+            self.completed_request_id = ""
+            self.spatial_relation = ""
+            self.prompt = request.get("prompt", "")
+            self.goal_key = request.get("goal_key", "")
+            self.requested = True
+            self.static_processed_for_request = False
+            self.wrist_processed_for_request = False
+            self.fused_instances = []
+            self.static_instances = []
+            self.wrist_instances = []
+            self.fused_point_cloud = None
+        else:
+            pyzlc.info(f"Polling existing request_id: {request_id}")
+        if self.goal_key:
+            pyzlc.info(f"sending goal pcd: {self.goal_key}")
+            for instance in self.fused_instances:
+                if self._instance_key(instance.name) == self._instance_key(self.goal_key):
+                    goal_point_cloud = instance.segmented_point_cloud
+                    pcd_data = np.asarray(goal_point_cloud.points, dtype=np.float32).tobytes()
+                    pyzlc.info(f"Found goal instance in fused_instances: {instance.name}.")
+                    return {
+                        "success": True,
+                        "request_id": request_id,
+                        "goal_point_cloud": pcd_data,
+                        "num_points": len(goal_point_cloud.points),
+                    }
+            return {"success": False, "request_id": request_id, "message": f"goal instance not found: {self.goal_key}"}
+        else:
+            return {
+                "request_id": request_id,
+                "spatial_relation": self.spatial_relation
+                if self.completed_request_id == request_id
+                else "",
+            }
+        
 
-        return {
-            "success": True,
-            "message": "will process the next static_cam and wrist_cam frames, then visualize fused point clouds",
-            "has_arm_state": self.latest_T_base_hand is not None,
-        }
+            
 
     def _project_instances_in_base(self, instances, config_path, T_base_hand, camera_name):
         for instance in instances:
@@ -242,7 +272,7 @@ class SceneGraphServer:
                 visualize=False,
                 depth_trunc=10.0,
             )
-            instance.segemtned_point_cloud = instance.segmented_point_cloud
+            instance.segmented_point_cloud = instance.segmented_point_cloud
 
     def _try_fuse_instances(self):
         if not self.static_processed_for_request or not self.wrist_processed_for_request:
@@ -271,15 +301,44 @@ class SceneGraphServer:
         if len(self.fused_instances) == 0:
             pyzlc.warning("No projected static_cam or wrist_cam instances were available to visualize.")
         else:
+            heuristics = TableSceneHeuristics()
+            spatial_relations = []
+            seen_relations = set()
+            contained_instance_keys = set()
+
             for instance in self.fused_instances:
                 for chosen_instance in self.fused_instances:
-                    if chosen_instance.name != instance.name:
-                        if TableSceneHeuristics().is_in(instance, chosen_instance):
-                            pyzlc.info(f"{instance.name} is in {chosen_instance.name}.")
-                            continue
+                    if chosen_instance.name == instance.name:
+                        continue
+                    if not heuristics.is_in(instance, chosen_instance):
+                        continue
 
-                        relation = TableSceneHeuristics().get_spatial_relation(instance, chosen_instance)
-                        pyzlc.info(f"Spatial relation: {relation}")
+                    relation = f"{instance.name} is in {chosen_instance.name}"
+                    if relation and relation not in seen_relations:
+                        spatial_relations.append(relation)
+                        seen_relations.add(relation)
+                    contained_instance_keys.add(self._instance_key(instance.name))
+
+            for instance in self.fused_instances:
+                if self._instance_key(instance.name) in contained_instance_keys:
+                    continue
+                for chosen_instance in self.fused_instances:
+                    if self._instance_key(chosen_instance.name) in contained_instance_keys:
+                        continue
+                    if chosen_instance.name != instance.name and heuristics.is_in(
+                        instance,
+                        chosen_instance,
+                    ):
+                        continue
+
+                    relation = heuristics.get_spatial_relation(instance, chosen_instance)
+                    if relation and relation not in seen_relations:
+                        spatial_relations.append(relation)
+                        seen_relations.add(relation)
+
+            self.spatial_relation = "\n".join(spatial_relations)
+            self.completed_request_id = self.active_request_id
+            pyzlc.info(f"Spatial relations:\n{self.spatial_relation}")
 
                 # self._visualize_all_fused_point_clouds()
 

@@ -18,9 +18,10 @@ class TableSceneHeuristics:
         self._world_bbox_cache[cache_key] = (xyz_min, xyz_max)
         return xyz_min, xyz_max
 
-    def is_on_table(self, instance: TableInstance, tabletop_high=-0.01, tabletop_low=-0.05):
+    def is_on_table(self, instance: TableInstance, tabletop_high=-0.01):
         xyz_min, _ = self._get_world_bbox(instance)
-        return tabletop_low < xyz_min[2] < tabletop_high
+        print(f"Object {instance.name} has min z: {xyz_min[2]:.3f}")
+        return xyz_min[2] < tabletop_high
 
     def is_on(self, obj1: TableInstance, obj2: TableInstance, height_threshold=0.02):
         bbox_1_min, bbox_1_max = self._get_world_bbox(obj1)
