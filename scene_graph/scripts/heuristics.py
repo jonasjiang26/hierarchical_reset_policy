@@ -50,6 +50,13 @@ class TableSceneHeuristics:
         overlap_volume = np.prod(overlap_max - overlap_min)
         obj1_volume = np.prod(bbox_1_max - bbox_1_min)
         return obj1_volume > 0 and overlap_volume / obj1_volume >= containment_ratio
+    
+    def is_in_initial_position(self, instance: TableInstance, initial_position: np.ndarray, position_threshold=0.05):
+        bbox_min, bbox_max = self._get_world_bbox(instance)
+        center = (bbox_min + bbox_max) / 2.0
+        distance = np.linalg.norm(center - initial_position)
+        print(f"Object {instance.name} is {distance:.3f}m from initial position")
+        return distance < position_threshold
 
     def get_spatial_relation(self, obj1: TableInstance, obj2: TableInstance):
         name1 = getattr(obj1, "name", "obj1")

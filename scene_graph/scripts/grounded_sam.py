@@ -1,4 +1,5 @@
 import torch
+import threading
 from PIL import Image
 import numpy as np
 from typing import Any, Dict
@@ -21,7 +22,12 @@ SAM_CHECKPOINT_PATH = "/home/jjiang/jing/Grounded-Segment-Anything/sam_vit_b_01e
 
 class GroundedSAM:
     def __init__(self, config_path=MODEL_CONFIG_PATH, checkpoint_path=MODEL_CHECKPOINT_PATH, device="cuda:0"):
+        self.device = device
         self.model = self.load_model(config_path, checkpoint_path, device)
+        self.sam = sam_model_registry[SAM_VERSION](checkpoint=SAM_CHECKPOINT_PATH)
+        self.sam.to(device).eval()
+        self.predictor = SamPredictor(self.sam)
+        self._segment_lock = threading.Lock()
 
 
     def load_model(self, 
@@ -33,8 +39,8 @@ class GroundedSAM:
         args.device = device
         model = build_model(args)
         checkpoint = torch.load(model_checkpoint_path, map_location="cpu")
-        load_res = model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
-        return model
+        model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
+        return model.to(device).eval()
     
     def load_image(self, image):
         image_pil = Image.fromarray(image)
@@ -54,9 +60,8 @@ class GroundedSAM:
         caption = caption.strip()
         if not caption.endswith("."):
             caption = caption + "."
-        model = model.to(device)
         image = image.to(device)
-        with torch.no_grad():
+        with torch.inference_mode():
             outputs = model(image[None], captions=[caption])
         logits = outputs["pred_logits"].cpu().sigmoid()[0]  # (nq, 256)
         boxes = outputs["pred_boxes"].cpu()[0]  # (nq, 4)
@@ -85,6 +90,18 @@ class GroundedSAM:
         return boxes_filt, pred_phrases
 
     def segment(self, model, image: np.ndarray, prompt: str, box_threshold, text_threshold, device, with_logits=True):
+        with self._segment_lock:
+            return self._segment_unlocked(
+                model,
+                image,
+                prompt,
+                box_threshold,
+                text_threshold,
+                device,
+                with_logits=with_logits,
+            )
+
+    def _segment_unlocked(self, model, image: np.ndarray, prompt: str, box_threshold, text_threshold, device, with_logits=True):
         image_pil, image_tensor = self.load_image(image)
         boxes, phrases = self.get_grounding_output(
             model,
@@ -95,27 +112,45 @@ class GroundedSAM:
             with_logits=with_logits,
             device=device,
         )
-        predictor = SamPredictor(sam_model_registry[SAM_VERSION](checkpoint=SAM_CHECKPOINT_PATH).to(device))
-        predictor.set_image(image)
         size = image_pil.size
         H, W = size[1], size[0]
+        if boxes.size(0) == 0:
+            return np.empty((0, 1, H, W), dtype=bool), phrases
+
+        self.predictor.set_image(image)
         for i in range(boxes.size(0)):
             boxes[i] = boxes[i] * torch.Tensor([W, H, W, H])
             boxes[i][:2] -= boxes[i][2:] / 2
             boxes[i][2:] = boxes[i][:2] + boxes[i][2:]
 
         boxes = boxes.cpu()
-        transformed_boxes = predictor.transform.apply_boxes_torch(boxes, image.shape[:2]).to(device)
+        transformed_boxes = self.predictor.transform.apply_boxes_torch(boxes, image.shape[:2]).to(device)
 
-        masks, _, _ = predictor.predict_torch(
-            point_coords = None,
-            point_labels = None,
-            boxes = transformed_boxes.to(device),
-            multimask_output = False,
-        )
-        
-        
+        try:
+            with torch.inference_mode():
+                masks, _, _ = self.predictor.predict_torch(
+                    point_coords=None,
+                    point_labels=None,
+                    boxes=transformed_boxes,
+                    multimask_output=False,
+                )
+            masks = masks.detach().cpu().numpy().astype(bool)
+        finally:
+            self._reset_predictor_image()
+
         return masks, phrases
+
+    def _reset_predictor_image(self):
+        if hasattr(self.predictor, "reset_image"):
+            self.predictor.reset_image()
+            return
+
+        self.predictor.features = None
+        self.predictor.is_image_set = False
+        self.predictor.orig_h = None
+        self.predictor.orig_w = None
+        self.predictor.input_h = None
+        self.predictor.input_w = None
 
     def post_process(self, outputs) -> Dict[str, Any]:
         # Implement post-processing logic to convert model outputs into desired format
