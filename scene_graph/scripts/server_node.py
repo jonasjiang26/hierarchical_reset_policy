@@ -1,7 +1,9 @@
 import pyzlc
 import cv2
+import gc
 import numpy as np
 import open3d as o3d
+import threading
 from pathlib import Path
 from typing import List
 from grounded_sam import GroundedSAM
@@ -49,7 +51,8 @@ class SceneGraphServer:
         pyzlc.register_subscriber_handler(DEPTHAI_STATIC_CAM_TOPIC, self.depthai_static_cam_callback, "robot_lab_robotiq_202")
         pyzlc.register_subscriber_handler("wrist_cam", self.wrist_cam_callback, "robot_lab_robotiq_202") 
         pyzlc.register_subscriber_handler("FrankaPanda/franka_arm_state", self.panda_arm_state_callback, "robot_lab_robotiq_202")
-        self.grounded_sam = GroundedSAM()
+        self.grounded_sam = None
+        self.grounded_sam_lock = threading.Lock()
 
     def zed_static_cam_callback(self, frame):
         # """Example callback for image data."""
@@ -225,7 +228,8 @@ class SceneGraphServer:
             else:
                 segmentation_image = np.ascontiguousarray(rgb[:, :, :3][:, :, ::-1])
 
-        masks, phrases = self.grounded_sam.segment(self.grounded_sam.model,
+        grounded_sam = self._ensure_grounded_sam_loaded()
+        masks, phrases = grounded_sam.segment(grounded_sam.model,
                                                     segmentation_image,
                                                     self.prompt,
                                                     0.3,
@@ -324,6 +328,8 @@ class SceneGraphServer:
             self.depthai_static_instances = []
             self.wrist_instances = []
             self.fused_point_cloud = None
+            if not self.goal_key:
+                self._ensure_grounded_sam_loaded()
         else:
             pyzlc.info(f"Polling existing request_id: {request_id}")
         if self.goal_key:
@@ -443,6 +449,7 @@ class SceneGraphServer:
                 # self._visualize_all_fused_point_clouds()
 
         self.requested = False
+        self._release_grounded_sam()
 
     def _group_projected_instances_by_key(self, instances):
         instances_by_key = {}
@@ -458,6 +465,29 @@ class SceneGraphServer:
 
     def _refresh_static_instances(self):
         self.static_instances = self.zed_static_instances + self.depthai_static_instances
+
+    def _ensure_grounded_sam_loaded(self):
+        with self.grounded_sam_lock:
+            if self.grounded_sam is None:
+                pyzlc.info("Loading GroundedSAM after receiving request.")
+                self.grounded_sam = GroundedSAM()
+            return self.grounded_sam
+
+    def _release_grounded_sam(self):
+        with self.grounded_sam_lock:
+            if self.grounded_sam is None:
+                return
+            pyzlc.info("Releasing GroundedSAM to free GPU memory.")
+            self.grounded_sam = None
+
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as exc:
+            pyzlc.warning(f"Could not clear CUDA cache after releasing GroundedSAM: {exc}")
 
     def _normalize_depth_frame(self, frame):
         depth_data = frame.get("depth_data")
