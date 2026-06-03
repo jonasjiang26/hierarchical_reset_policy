@@ -4,9 +4,11 @@ import argparse
 import base64
 import json
 import threading
+import time
 import traceback
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -18,12 +20,13 @@ import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_PROMPT_PATH = "/home/jjiang/jing/hierarchical_reset_policy/scene_graph/configs/success_checker_prompt_p1_vla.yaml"
+DEFAULT_PROMPT_PATH = "/home/jjiang/jing/hierarchical_reset_policy/scene_graph/configs/mp_success_checker_prompt.yaml"
 DEFAULT_NODE_IP = "141.3.53.25"
 DEFAULT_GROUP_NAME = "robot_lab_robotiq_202"
 DEFAULT_GROUP_PORT = 7725
 DEFAULT_STATIC_CAM_TOPIC = "static_cam"
 DEFAULT_SERVICE_NAME = "phase_1_success_checker"
+DEFAULT_SCENE_GRAPH_SERVICE_NAME = "scene_graph"
 DEFAULT_LLM_URL = "http://141.3.54.19:8000/v1/chat/completions"
 DEFAULT_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
 _MISSING = object()
@@ -41,7 +44,10 @@ class Phase1SuccessChecker:
         group_name: str = DEFAULT_GROUP_NAME,
         group_port: int = DEFAULT_GROUP_PORT,
         static_cam_topic: str = DEFAULT_STATIC_CAM_TOPIC,
+        scene_graph_service_name: str = DEFAULT_SCENE_GRAPH_SERVICE_NAME,
         frame_timeout: float = 5.0,
+        scene_graph_timeout: float = 60.0,
+        scene_graph_poll_interval: float = 1.0,
         request_timeout: float = 60.0,
         jpeg_quality: int = 90,
         api_key: str | None = None,
@@ -53,7 +59,10 @@ class Phase1SuccessChecker:
         self.model = model
         self.group_name = group_name
         self.static_cam_topic = static_cam_topic
+        self.scene_graph_service_name = scene_graph_service_name
         self.frame_timeout = frame_timeout
+        self.scene_graph_timeout = scene_graph_timeout
+        self.scene_graph_poll_interval = scene_graph_poll_interval
         self.request_timeout = request_timeout
         self.jpeg_quality = jpeg_quality
         self.api_key = api_key
@@ -136,8 +145,9 @@ class Phase1SuccessChecker:
             wait_for_new_frame=wait_for_new_frame,
             frame_timeout=frame_timeout,
         )
+        spatial_relation = self._get_current_spatial_relation()
         image_url = self._frame_to_jpeg_data_url(frame)
-        messages = self._build_messages(query_key, image_url)
+        messages = self._build_messages(query_key, image_url, spatial_relation)
         return self._send_chat_completion(messages)
 
     def _get_static_frame(
@@ -174,9 +184,15 @@ class Phase1SuccessChecker:
             raise RuntimeError(f"No frame is available from {self.static_cam_topic!r}.")
         return frame
 
-    def _build_messages(self, query_key: str, image_url: str) -> list[dict[str, Any]]:
+    def _build_messages(
+        self,
+        query_key: str,
+        image_url: str,
+        spatial_relation: str,
+    ) -> list[dict[str, Any]]:
         system_prompt = self._prompt_text("system")
         user_prompt = self._prompt_text(query_key)
+        user_prompt = self._fill_current_spatial_relation(user_prompt, spatial_relation)
 
         return [
             {
@@ -235,6 +251,47 @@ class Phase1SuccessChecker:
             return data["choices"][0]["message"]["content"].strip()
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(f"Unexpected LLM response: {data}") from exc
+
+    def _get_current_spatial_relation(self) -> str:
+        prompt = self._prompt_text("prompt")
+        request_id = str(uuid.uuid4())
+        request = {
+            "request_id": request_id,
+            "prompt": prompt,
+        }
+        request_fn = getattr(pyzlc, "call", None) or getattr(pyzlc, "zlc_request")
+        deadline = time.monotonic() + self.scene_graph_timeout
+
+        pyzlc.info(
+            f"Requesting spatial relation from {self.scene_graph_service_name}: "
+            f"request_id={request_id}, prompt={prompt!r}"
+        )
+        while True:
+            response = request_fn(
+                self.scene_graph_service_name,
+                request,
+                timeout=self.scene_graph_timeout,
+                group_name=self.group_name,
+            )
+            if response and response.get("scene_graph_complete"):
+                spatial_relation = str(response.get("spatial_relation", "")).strip()
+                pyzlc.info(f"Current spatial relation:\n{spatial_relation}")
+                return spatial_relation
+
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Scene graph did not complete within {self.scene_graph_timeout:.1f}s."
+                )
+            time.sleep(self.scene_graph_poll_interval)
+
+    def _fill_current_spatial_relation(self, prompt: str, spatial_relation: str) -> str:
+        if "{current_spatial_relation}" in prompt:
+            return prompt.format(current_spatial_relation=spatial_relation)
+
+        return prompt.replace(
+            "current spatial relation: ''",
+            f"current spatial relation: '{spatial_relation}'",
+        )
 
     def _frame_to_jpeg_data_url(self, frame: Any) -> str:
         image = self._frame_to_rgb_image(frame)
@@ -395,7 +452,7 @@ class Phase1SuccessChecker:
         if not isinstance(prompts, dict):
             raise TypeError(f"Prompt file {prompt_path} must contain a YAML mapping.")
 
-        required_keys = ("system", "roll-out_query", "reset_query")
+        required_keys = ("prompt", "system", "roll-out_query", "reset_query")
         missing_keys = [key for key in required_keys if key not in prompts]
         if missing_keys:
             raise KeyError(f"Prompt file {prompt_path} is missing keys: {missing_keys}")
@@ -413,10 +470,13 @@ def main() -> None:
     parser.add_argument("--group-port", type=int, default=DEFAULT_GROUP_PORT)
     parser.add_argument("--service-name", default=DEFAULT_SERVICE_NAME)
     parser.add_argument("--static-cam-topic", default=DEFAULT_STATIC_CAM_TOPIC)
+    parser.add_argument("--scene-graph-service-name", default=DEFAULT_SCENE_GRAPH_SERVICE_NAME)
     parser.add_argument("--prompt-path", default=DEFAULT_PROMPT_PATH)
     parser.add_argument("--llm-url", default=DEFAULT_LLM_URL)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--frame-timeout", type=float, default=5.0)
+    parser.add_argument("--scene-graph-timeout", type=float, default=60.0)
+    parser.add_argument("--scene-graph-poll-interval", type=float, default=1.0)
     parser.add_argument("--request-timeout", type=float, default=60.0)
     args = parser.parse_args()
 
@@ -428,7 +488,10 @@ def main() -> None:
         group_name=args.group_name,
         group_port=args.group_port,
         static_cam_topic=args.static_cam_topic,
+        scene_graph_service_name=args.scene_graph_service_name,
         frame_timeout=args.frame_timeout,
+        scene_graph_timeout=args.scene_graph_timeout,
+        scene_graph_poll_interval=args.scene_graph_poll_interval,
         request_timeout=args.request_timeout,
     )
 

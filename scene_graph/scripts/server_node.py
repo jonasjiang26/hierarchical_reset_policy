@@ -48,7 +48,7 @@ class SceneGraphServer:
         pyzlc.info(f"Forcing {ZED_STATIC_CAM_TOPIC} subscriber to use TCP transport.")
         pyzlc.get_node("robot_lab_robotiq_202").subscriber_manager.local_ip = ""
         pyzlc.register_subscriber_handler(ZED_STATIC_CAM_TOPIC, self.zed_static_cam_callback, "robot_lab_robotiq_202")
-        pyzlc.register_subscriber_handler(DEPTHAI_STATIC_CAM_TOPIC, self.depthai_static_cam_callback, "robot_lab_robotiq_202")
+        # pyzlc.register_subscriber_handler(DEPTHAI_STATIC_CAM_TOPIC, self.depthai_static_cam_callback, "robot_lab_robotiq_202")
         pyzlc.register_subscriber_handler("wrist_cam", self.wrist_cam_callback, "robot_lab_robotiq_202") 
         pyzlc.register_subscriber_handler("FrankaPanda/franka_arm_state", self.panda_arm_state_callback, "robot_lab_robotiq_202")
         self.grounded_sam = None
@@ -115,7 +115,7 @@ class SceneGraphServer:
                 return None
 
             self.depthai_static_processed_for_request = True
-            masks, phrases = self.process_frame(frame, visualize_masks=False, convert_rgb_to_bgr=True)
+            masks, phrases = self.process_frame(frame, visualize_masks=False, convert_rgb_to_bgr=False)
             pyzlc.info(f"Processed {DEPTHAI_STATIC_CAM_TOPIC} frame")
             if masks is None:
                 self._try_fuse_instances()
@@ -169,7 +169,7 @@ class SceneGraphServer:
 
             T_base_hand = self.latest_T_base_hand.copy()
             self.wrist_processed_for_request = True
-            masks, phrases = self.process_frame(frame, visualize_masks=False, convert_rgb_to_bgr=True)
+            masks, phrases = self.process_frame(frame, visualize_masks=False, convert_rgb_to_bgr=False)
             if masks is None:
                 self._try_fuse_instances()
                 return {"success": False, "message": "no masks detected"}
@@ -375,14 +375,14 @@ class SceneGraphServer:
     def _try_fuse_instances(self):
         if (
             not self.zed_static_processed_for_request
-            or not self.depthai_static_processed_for_request
+            # or not self.depthai_static_processed_for_request
             or not self.wrist_processed_for_request
         ):
             return
 
         self.fused_instances = []
         instances_by_key = self._group_projected_instances_by_key(
-            self.zed_static_instances + self.depthai_static_instances + self.wrist_instances
+            self.zed_static_instances + self.wrist_instances # + self.depthai_static_instances
         )
 
         for key, instances in sorted(instances_by_key.items()):
@@ -446,7 +446,7 @@ class SceneGraphServer:
             self.completed_request_id = self.active_request_id
             pyzlc.info(f"Spatial relations:\n{self.spatial_relation}")
 
-                # self._visualize_all_fused_point_clouds()
+            self._visualize_all_fused_point_clouds()
 
         self.requested = False
         self._release_grounded_sam()
