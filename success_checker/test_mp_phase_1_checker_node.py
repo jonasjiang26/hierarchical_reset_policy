@@ -1,5 +1,7 @@
 import argparse
 import pprint
+import time
+import uuid
 
 import pyzlc
 
@@ -25,7 +27,10 @@ def main() -> None:
     parser.add_argument("--service-name", default=DEFAULT_SERVICE_NAME)
     parser.add_argument("--scene-graph-service-name", default=DEFAULT_SCENE_GRAPH_SERVICE_NAME)
     parser.add_argument("--state", choices=("rollout", "reset"), default="rollout")
+    parser.add_argument("--request-id", default=None)
     parser.add_argument("--timeout", type=float, default=90.0)
+    parser.add_argument("--poll-interval", type=float, default=1.0)
+    parser.add_argument("--max-polls", type=int, default=120)
     parser.add_argument(
         "--frame-timeout",
         type=float,
@@ -39,7 +44,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    request_id = args.request_id or str(uuid.uuid4())
     request = {
+        "request_id": request_id,
         "state": "roll-out state" if args.state == "rollout" else "reset state",
         "wait_for_new_frame": args.wait_for_new_frame,
         "frame_timeout": args.frame_timeout,
@@ -55,9 +62,17 @@ def main() -> None:
     print(f"Sending request to {args.service_name}:")
     pprint.pp(request)
 
-    response = call_success_checker(args.service_name, request, args.timeout, args.group_name)
-    print("\nResponse:")
-    pprint.pp(response)
+    for poll_index in range(args.max_polls + 1):
+        response = call_success_checker(args.service_name, request, args.timeout, args.group_name)
+        print(f"\nResponse {poll_index}:")
+        pprint.pp(response)
+
+        if response and response.get("complete", True):
+            return
+
+        time.sleep(args.poll_interval)
+
+    print("\nTimed out waiting for MP success checker completion.")
 
 
 if __name__ == "__main__":

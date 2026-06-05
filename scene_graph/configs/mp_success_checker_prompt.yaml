@@ -1,4 +1,4 @@
-prompt: "carrot. pan."
+prompt: "metal plate. carrot."
 
 system: |
   You are my robot research assistant.
@@ -22,13 +22,12 @@ system: |
   - "reset succeeded" if the reset process succeeded
 
 roll-out_query:
-  user: "Roll-out is finished. Task: 'put carrot in the pan.'
-    Goal spatial relation: 'carrot in the pan. pan on the table'
+  user: "Gripper released. Task: 'put carrot in the metal plate.'
+    Goal spatial relation: 'carrot in the metal plate. metal plate on the table'
     current spatial relation: ''
     Tell me the current roll-out state only by the carrot's position."
 
 reset_query:
-  user: "Reset is finished.
-    Goal spatial relation: 'potato in initial place. pan on the table'
+  user: "Gripper released.The carrot should be moved to the initial place. The initial place of the carrot is on the right side of the table.
     current spatial relation: ''
     Tell me the current reset state only by the carrot's position."

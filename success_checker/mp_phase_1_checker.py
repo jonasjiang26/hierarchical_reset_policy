@@ -70,6 +70,9 @@ class Phase1SuccessChecker:
         self.latest_static_frame: Mapping[str, Any] | None = None
         self._frame_event = threading.Event()
         self._frame_lock = threading.Lock()
+        self._request_lock = threading.Lock()
+        self._request_results: dict[str, dict[str, Any]] = {}
+        self._request_threads: dict[str, threading.Thread] = {}
 
         if init_pyzlc:
             pyzlc.init(DEFAULT_SERVICE_NAME, node_ip, group_name, group_port=group_port)
@@ -108,7 +111,48 @@ class Phase1SuccessChecker:
             request_kind = self._request_kind(request)
             wait_for_new_frame = self._wait_for_new_frame(request)
             frame_timeout = self._request_frame_timeout(request)
+            request_id = self._request_id(request)
 
+            with self._request_lock:
+                result = self._request_results.get(request_id)
+                if result is not None:
+                    return result
+
+                thread = self._request_threads.get(request_id)
+                if thread is None or not thread.is_alive():
+                    thread = threading.Thread(
+                        target=self._run_check_state_request,
+                        args=(request_id, request_kind, wait_for_new_frame, frame_timeout),
+                        daemon=True,
+                    )
+                    self._request_threads[request_id] = thread
+                    thread.start()
+
+            return {
+                "success": False,
+                "request_id": request_id,
+                "complete": False,
+                "state": "",
+                "message": "processing",
+            }
+        except Exception as exc:
+            pyzlc.error(f"{DEFAULT_SERVICE_NAME} request failed: {exc}")
+            pyzlc.error(traceback.format_exc())
+            return {
+                "success": False,
+                "complete": True,
+                "state": "",
+                "message": str(exc),
+            }
+
+    def _run_check_state_request(
+        self,
+        request_id: str,
+        request_kind: str,
+        wait_for_new_frame: bool,
+        frame_timeout: float | None,
+    ) -> None:
+        try:
             if request_kind == "task":
                 raw_response = self.check_rollout(
                     wait_for_new_frame=wait_for_new_frame,
@@ -121,19 +165,27 @@ class Phase1SuccessChecker:
                 )
 
             state = self._normalize_state_response(raw_response, request_kind)
-            return {
+            result = {
                 "success": True,
+                "request_id": request_id,
+                "complete": True,
                 "state": state,
                 "raw_response": raw_response,
             }
         except Exception as exc:
-            pyzlc.error(f"{DEFAULT_SERVICE_NAME} request failed: {exc}")
+            pyzlc.error(f"{DEFAULT_SERVICE_NAME} background request failed: {exc}")
             pyzlc.error(traceback.format_exc())
-            return {
+            result = {
                 "success": False,
+                "request_id": request_id,
+                "complete": True,
                 "state": "",
                 "message": str(exc),
             }
+
+        with self._request_lock:
+            self._request_results[request_id] = result
+            self._request_threads.pop(request_id, None)
 
     def _check(
         self,
@@ -430,6 +482,11 @@ class Phase1SuccessChecker:
         if frame_timeout <= 0:
             raise ValueError(f"frame_timeout must be positive. Got: {frame_timeout}")
         return frame_timeout
+
+    def _request_id(self, request: Any) -> str:
+        if isinstance(request, dict) and request.get("request_id"):
+            return str(request["request_id"])
+        return str(uuid.uuid4())
 
     def _normalize_state_response(self, raw_response: str, request_kind: str) -> str:
         text = raw_response.strip().lower()

@@ -26,8 +26,8 @@ def main() -> None:
         return
 
     request = {
-        "prompt": "sponge. bowl.",
-        # "goal_key": "wash sponge.",
+        "request_id": "test-drawers-001",
+        "prompt": "high drawer. yellow plate. lemon.",
     }
     pyzlc.info(f"Sending request: {request}")
 
