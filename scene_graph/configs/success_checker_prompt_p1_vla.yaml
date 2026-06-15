@@ -17,9 +17,9 @@ system: |
   - "reset failed" if the reset process failed
 
 roll-out_query:
-  user: "Gripper released. Task: 'put carrot in the pan.'
-    Tell me the current roll-out state only by the position of the carrot."
+  user: "Gripper released. Task: 'open and close the drawer.'
+    Tell me the current roll-out state only by the position of the drawer."
 
 reset_query:
-  user: "Gripper released. The carrot should be moved to the initial place. The initial place of the carrot is on the right side of the table.
-    Tell me the current reset state only by the carrot's position. "
+  user: "Gripper released. The drawer should be fully closed.
+    Tell me the current reset state only by the drawer's position. "
