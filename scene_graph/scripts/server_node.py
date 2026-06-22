@@ -39,7 +39,7 @@ class SceneGraphServer:
         self.prompt = str
         self.active_request_id = ""
         self.completed_request_id = ""
-        self.spatial_relation = ""
+        self.spatial_relation = self._empty_spatial_relation()
         self.wrist_instances: List[TableInstance] = []
         self.zed_static_instances: List[TableInstance] = []
         self.depthai_static_instances: List[TableInstance] = []
@@ -92,6 +92,7 @@ class SceneGraphServer:
                 config_path=ZED_STATIC_CAM_CONFIG,
                 T_base_hand=None,
                 camera_name=ZED_STATIC_CAM_TOPIC,
+                filter=False
             )
             self._try_fuse_instances()
 
@@ -141,6 +142,7 @@ class SceneGraphServer:
                 config_path=DEPTHAI_STATIC_CAM_CONFIG,
                 T_base_hand=None,
                 camera_name=DEPTHAI_STATIC_CAM_TOPIC,
+                filter=True
             )
             self._try_fuse_instances()
 
@@ -192,6 +194,7 @@ class SceneGraphServer:
                 config_path=WRIST_CAM_CONFIG,
                 T_base_hand=T_base_hand,
                 camera_name="wrist_cam",
+                filter=True
             )
             self._try_fuse_instances()
 
@@ -315,7 +318,7 @@ class SceneGraphServer:
         if request_id != self.active_request_id:
             self.active_request_id = request_id
             self.completed_request_id = ""
-            self.spatial_relation = ""
+            self.spatial_relation = self._empty_spatial_relation()
             self.prompt = request.get("prompt", "")
             self.goal_key = request.get("goal_key", "")
             self.requested = True
@@ -361,7 +364,7 @@ class SceneGraphServer:
 
             
 
-    def _project_instances_in_base(self, instances, config_path, T_base_hand, camera_name):
+    def _project_instances_in_base(self, instances, config_path, T_base_hand, camera_name, filter):
         for instance in instances:
             pyzlc.info(f"Projecting {camera_name} segmented point cloud for instance: {instance.name}")
             instance.segmented_point_cloud = instance.segmented_point_cloud_in_base(
@@ -369,6 +372,7 @@ class SceneGraphServer:
                 T_base_hand=T_base_hand,
                 visualize=False,
                 depth_trunc=10.0,
+                filter_noise=filter
             )
             instance.segmented_point_cloud = instance.segmented_point_cloud
 
@@ -382,7 +386,7 @@ class SceneGraphServer:
 
         self.fused_instances = []
         instances_by_key = self._group_projected_instances_by_key(
-            self.zed_static_instances + self.wrist_instances # + self.depthai_static_instances
+            self.zed_static_instances + self.depthai_static_instances # +self.wrist_instances
         )
 
         for key, instances in sorted(instances_by_key.items()):
@@ -404,13 +408,13 @@ class SceneGraphServer:
             pyzlc.warning(
                 f"No projected {ZED_STATIC_CAM_TOPIC}, {DEPTHAI_STATIC_CAM_TOPIC}, or wrist_cam instances were available."
             )
-            self.spatial_relation = ""
+            self.spatial_relation = self._empty_spatial_relation()
             self.completed_request_id = self.active_request_id
         else:
             heuristics = TableSceneHeuristics()
             spatial_relations = []
             seen_relations = set()
-            contained_instance_keys = set()
+            placed_instance_keys = set()
 
             for instance in self.fused_instances:
                 for chosen_instance in self.fused_instances:
@@ -423,30 +427,41 @@ class SceneGraphServer:
                     if relation and relation not in seen_relations:
                         spatial_relations.append(relation)
                         seen_relations.add(relation)
-                    contained_instance_keys.add(self._instance_key(instance.name))
+                    placed_instance_keys.add(self._instance_key(instance.name))
 
             for instance in self.fused_instances:
-                if self._instance_key(instance.name) in contained_instance_keys:
+                if self._instance_key(instance.name) in placed_instance_keys:
                     continue
                 for chosen_instance in self.fused_instances:
-                    if self._instance_key(chosen_instance.name) in contained_instance_keys:
-                        continue
-                    if chosen_instance.name != instance.name and heuristics.is_in(
-                        instance,
-                        chosen_instance,
-                    ):
+                    if chosen_instance.name == instance.name:
                         continue
 
-                    relation = heuristics.get_spatial_relation(instance, chosen_instance)
+                    if not heuristics.is_on(instance, chosen_instance):
+                        continue
+
+                    relation = f"{instance.name} on {chosen_instance.name}"
                     if relation and relation not in seen_relations:
                         spatial_relations.append(relation)
                         seen_relations.add(relation)
+                    placed_instance_keys.add(self._instance_key(instance.name))
+                    break
 
-            self.spatial_relation = "\n".join(spatial_relations)
+            for instance in self.fused_instances:
+                if self._instance_key(instance.name) in placed_instance_keys:
+                    continue
+                if not heuristics.is_on_table(instance):
+                    continue
+
+                relation = f"{instance.name} on table"
+                if relation and relation not in seen_relations:
+                    spatial_relations.append(relation)
+                    seen_relations.add(relation)
+
+            self.spatial_relation = self._build_spatial_relation_graph(spatial_relations)
             self.completed_request_id = self.active_request_id
             pyzlc.info(f"Spatial relations:\n{self.spatial_relation}")
 
-            self._visualize_all_fused_point_clouds()
+            # self._visualize_all_fused_point_clouds()
 
         self.requested = False
         self._release_grounded_sam()
@@ -462,6 +477,33 @@ class SceneGraphServer:
 
     def _instance_key(self, name):
         return name.strip().lower().rstrip(".")
+
+    def _empty_spatial_relation(self):
+        return {
+            "objects": [],
+            "relations": [],
+        }
+
+    def _build_spatial_relation_graph(self, spatial_relations):
+        graph = self._empty_spatial_relation()
+        seen_object_keys = set()
+
+        for instance in self.fused_instances:
+            self._add_spatial_object(graph, seen_object_keys, instance.name)
+
+        for relation in spatial_relations:
+            graph["relations"].append({"relation": relation})
+            if relation.endswith(" on table"):
+                self._add_spatial_object(graph, seen_object_keys, "table")
+
+        return graph
+
+    def _add_spatial_object(self, graph, seen_object_keys, object_id):
+        object_key = self._instance_key(object_id)
+        if object_key in seen_object_keys:
+            return
+        graph["objects"].append({"id": object_id})
+        seen_object_keys.add(object_key)
 
     def _refresh_static_instances(self):
         self.static_instances = self.zed_static_instances + self.depthai_static_instances

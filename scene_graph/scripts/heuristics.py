@@ -23,7 +23,7 @@ class TableSceneHeuristics:
         print(f"Object {instance.name} has min z: {xyz_min[2]:.3f}")
         return xyz_min[2] < tabletop_high
 
-    def is_on(self, obj1: TableInstance, obj2: TableInstance, height_threshold=0.03):
+    def is_on(self, obj1: TableInstance, obj2: TableInstance, height_threshold=0.04):
         bbox_1_min, bbox_1_max = self._get_world_bbox(obj1)
         bbox_2_min, bbox_2_max = self._get_world_bbox(obj2)
 
@@ -64,7 +64,7 @@ class TableSceneHeuristics:
         if self.is_on(obj1, obj2):
             return f"{name1} on {name2}"
         elif self.is_on_table(obj1):
-            return f"{name1} on the table"
+            return f"{name1} on table"
         else:
             return None
         

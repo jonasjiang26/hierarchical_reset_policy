@@ -326,7 +326,9 @@ class Phase1SuccessChecker:
                 group_name=self.group_name,
             )
             if response and response.get("scene_graph_complete"):
-                spatial_relation = str(response.get("spatial_relation", "")).strip()
+                spatial_relation = self._format_spatial_relation(
+                    response.get("spatial_relation", "")
+                )
                 pyzlc.info(f"Current spatial relation:\n{spatial_relation}")
                 return spatial_relation
 
@@ -335,6 +337,13 @@ class Phase1SuccessChecker:
                     f"Scene graph did not complete within {self.scene_graph_timeout:.1f}s."
                 )
             time.sleep(self.scene_graph_poll_interval)
+
+    def _format_spatial_relation(self, spatial_relation: Any) -> str:
+        if spatial_relation is None:
+            return ""
+        if isinstance(spatial_relation, str):
+            return spatial_relation.strip()
+        return json.dumps(spatial_relation, ensure_ascii=False)
 
     def _fill_current_spatial_relation(self, prompt: str, spatial_relation: str) -> str:
         if "{current_spatial_relation}" in prompt:
