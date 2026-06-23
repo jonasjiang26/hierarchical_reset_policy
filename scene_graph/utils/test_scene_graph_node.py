@@ -33,7 +33,7 @@ def main():
     parser.add_argument("--group-name", default=DEFAULT_GROUP_NAME)
     parser.add_argument("--group-port", type=int, default=DEFAULT_GROUP_PORT)
     parser.add_argument("--service-name", default=DEFAULT_SERVICE_NAME)
-    parser.add_argument("--prompt", default="sponge. bowl.")
+    parser.add_argument("--prompt", default="lemon. drawer. plate.")
     parser.add_argument("--request-id", default=None)
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--poll-interval", type=float, default=1.0)

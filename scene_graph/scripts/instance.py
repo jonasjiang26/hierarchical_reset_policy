@@ -218,7 +218,7 @@ class TableInstance:
         first_pcd,
         second_pcd,
         voxel_size=0.003,
-        filter_noise=False,
+        filter_noise=True,
         outlier_nb_neighbors=30,
         outlier_std_ratio=1.5,
         cluster_eps=0.015,
