@@ -1,3 +1,4 @@
+import asyncio
 import pyzlc
 import cv2
 import numpy as np
@@ -17,6 +18,16 @@ ZED_STATIC_CAM_CONFIG = CONFIG_DIR / "eye_to_hand_zed.yaml"
 DEPTHAI_STATIC_CAM_TOPIC = "static_cam"
 DEPTHAI_STATIC_CAM_CONFIG = CONFIG_DIR / "eye_to_hand.yaml"
 WRIST_CAM_CONFIG = CONFIG_DIR / "wrist_cam_hand_eye.yaml"
+CAMERA_TOPICS = (
+    ZED_STATIC_CAM_TOPIC,
+    DEPTHAI_STATIC_CAM_TOPIC,
+    "wrist_cam",
+)
+# Both camera publishers stamp frames with time.time(), i.e. Unix epoch
+# seconds as a float. Allow a small NTP/clock offset, but never process a
+# frame that has spent several seconds in the transport queue.
+CAMERA_CLOCK_SKEW_TOLERANCE_SECONDS = 0.25
+MAX_ACCEPTABLE_FRAME_AGE_SECONDS = 2.0
 
 class SceneGraphServer:
     """A simple server node that provides a service to add two integers."""
@@ -55,10 +66,14 @@ class SceneGraphServer:
         self._latest_frame_slots = {}
         self._request_frame_cutoffs = dict(self._frame_sequences)
         self._request_started_monotonic = 0.0
+        self._request_started_wall_time = 0.0
         self._request_generation = 0
+        self._camera_stream_ready_generation = 0
+        self._processed_frame_metadata = {}
         self._frame_worker_running = True
         pyzlc.info(f"Forcing {ZED_STATIC_CAM_TOPIC} subscriber to use TCP transport.")
-        pyzlc.get_node("robot_lab_robotiq_202").subscriber_manager.local_ip = ""
+        self._pyzlc_node = pyzlc.get_node("robot_lab_robotiq_202")
+        self._pyzlc_node.subscriber_manager.local_ip = ""
         pyzlc.register_subscriber_handler(
             ZED_STATIC_CAM_TOPIC,
             self.zed_static_cam_callback,
@@ -118,6 +133,8 @@ class SceneGraphServer:
 
     def _store_latest_camera_frame(self, topic, frame):
         received_at = time.monotonic()
+        received_wall_time = time.time()
+        capture_time = self._camera_capture_time(frame)
         with self._frame_condition:
             sequence = self._frame_sequences[topic] + 1
             self._frame_sequences[topic] = sequence
@@ -125,6 +142,8 @@ class SceneGraphServer:
                 "frame": frame,
                 "sequence": sequence,
                 "received_at": received_at,
+                "received_wall_time": received_wall_time,
+                "capture_time": capture_time,
             }
             self.latest_frame = frame
             if topic == ZED_STATIC_CAM_TOPIC:
@@ -150,6 +169,8 @@ class SceneGraphServer:
 
     def _claim_next_frame_job_locked(self):
         if not self.requested:
+            return None
+        if self._camera_stream_ready_generation != self._request_generation:
             return None
 
         topic_settings = (
@@ -187,6 +208,34 @@ class SceneGraphServer:
                 continue
             if slot["received_at"] <= self._request_started_monotonic:
                 continue
+            capture_time = slot["capture_time"]
+            if capture_time is None:
+                pyzlc.warning(
+                    f"Rejecting {topic} frame without a valid time.time() "
+                    f"timestamp: {slot['frame'].get('timestamp')!r}"
+                )
+                continue
+
+            frame_age = time.time() - capture_time
+            if capture_time < (
+                self._request_started_wall_time
+                - CAMERA_CLOCK_SKEW_TOLERANCE_SECONDS
+            ):
+                pyzlc.warning(
+                    f"Rejecting pre-request {topic} frame: timestamp="
+                    f"{slot['frame'].get('timestamp')}, "
+                    f"request_timestamp={self._request_started_wall_time:.6f}, "
+                    f"frame_age={frame_age:.3f}s"
+                )
+                continue
+            if frame_age > MAX_ACCEPTABLE_FRAME_AGE_SECONDS:
+                pyzlc.warning(
+                    f"Rejecting delayed {topic} frame: timestamp="
+                    f"{slot['frame'].get('timestamp')}, "
+                    f"frame_age={frame_age:.3f}s exceeds "
+                    f"{MAX_ACCEPTABLE_FRAME_AGE_SECONDS:.3f}s"
+                )
+                continue
 
             T_base_hand = None
             if topic == "wrist_cam":
@@ -200,6 +249,8 @@ class SceneGraphServer:
                 "frame": slot["frame"],
                 "sequence": slot["sequence"],
                 "received_at": slot["received_at"],
+                "received_wall_time": slot["received_wall_time"],
+                "capture_time": capture_time,
                 "request_id": self.active_request_id,
                 "request_generation": self._request_generation,
                 "prompt": self.prompt,
@@ -211,15 +262,100 @@ class SceneGraphServer:
 
         return None
 
+    async def _reset_camera_subscribers(self, request_generation, request_id):
+        manager = self._pyzlc_node.subscriber_manager
+        subscriber_dict = getattr(manager, "subscriber_dict", None)
+
+        if subscriber_dict is None:
+            pyzlc.warning(
+                "This pyzlc version does not expose subscriber_dict; "
+                "cannot reset camera TCP streams."
+            )
+            self._mark_camera_streams_ready(request_generation)
+            return
+
+        subscribers_and_urls = []
+        try:
+            for topic in CAMERA_TOPICS:
+                subscriber = subscriber_dict.get(topic)
+                if subscriber is None:
+                    pyzlc.warning(
+                        f"Cannot reset {topic} stream: subscriber is not registered."
+                    )
+                    continue
+
+                urls = list(getattr(subscriber, "sub_urls", []))
+                subscribers_and_urls.append((topic, subscriber, urls))
+                for url in urls:
+                    subscriber._socket.disconnect(url)
+                subscriber.sub_urls.clear()
+
+            # Yield to the ZeroMQ event loop after disconnecting so queued
+            # messages from the old TCP connections are discarded.
+            await asyncio.sleep(0.05)
+
+            for topic, subscriber, urls in subscribers_and_urls:
+                for url in urls:
+                    subscriber.connect(url)
+                pyzlc.info(
+                    f"Reset {topic} subscriber for request_id={request_id}; "
+                    f"reconnected to {len(urls)} publisher(s)."
+                )
+        except Exception as exc:
+            pyzlc.error(
+                f"Failed to reset camera subscribers for request_id={request_id}: {exc}"
+            )
+            pyzlc.error(traceback.format_exc())
+        finally:
+            self._mark_camera_streams_ready(request_generation)
+
+    def _mark_camera_streams_ready(self, request_generation):
+        with self._frame_condition:
+            if request_generation != self._request_generation:
+                return
+
+            self._latest_frame_slots.clear()
+            self._request_frame_cutoffs = dict(self._frame_sequences)
+            self._request_started_monotonic = time.monotonic()
+            self._request_started_wall_time = time.time()
+            self._camera_stream_ready_generation = request_generation
+            self._frame_condition.notify_all()
+            pyzlc.info(
+                f"Camera streams ready for request_id={self.active_request_id}; "
+                f"frame cutoffs={self._request_frame_cutoffs}"
+            )
+
+    def _camera_capture_time(self, frame):
+        """Return the camera's time.time() capture timestamp."""
+        timestamp = frame.get("timestamp")
+        if isinstance(timestamp, bool) or timestamp is None:
+            return None
+
+        try:
+            capture_time = float(timestamp)
+        except (TypeError, ValueError):
+            return None
+
+        # time.time() is currently around 1.8e9. Reject device-relative
+        # clocks, counters, milliseconds, and nanoseconds so publisher/server
+        # timestamp contract errors are visible instead of silently guessed.
+        if not 1_000_000_000.0 <= capture_time <= 10_000_000_000.0:
+            return None
+        return capture_time
+
     def _process_frame_job(self, job):
         topic = job["topic"]
         frame = job["frame"]
         request_generation = job["request_generation"]
         try:
             frame = self._normalize_depth_frame(frame)
+            frame_age_at_receive = job["received_wall_time"] - job["capture_time"]
+            frame_age_now = time.time() - job["capture_time"]
             pyzlc.info(
                 f"Processing fresh {topic} frame for request_id={job['request_id']}: "
-                f"sequence={job['sequence']}, timestamp={frame.get('timestamp')}"
+                f"sequence={job['sequence']}, timestamp={frame.get('timestamp')}, "
+                f"age_at_receive={frame_age_at_receive:.3f}s, "
+                f"age_at_processing={frame_age_now:.3f}s"
             )
             masks, phrases = self.process_frame(
                 frame,
@@ -259,6 +395,12 @@ class SceneGraphServer:
                     )
                     return
                 setattr(self, job["instances_attr"], instances)
+                self._processed_frame_metadata[topic] = {
+                    "timestamp": job["capture_time"],
+                    "age_at_receive_seconds": frame_age_at_receive,
+                    "age_at_processing_seconds": frame_age_now,
+                    "sequence": job["sequence"],
+                }
                 self._refresh_static_instances()
 
             pyzlc.info(f"Created {len(instances)} {topic} instances.")
@@ -383,6 +525,7 @@ class SceneGraphServer:
         with self._frame_condition:
             if request_id != self.active_request_id:
                 self._request_generation += 1
+                request_generation = self._request_generation
                 self.active_request_id = request_id
                 self.completed_request_id = ""
                 self.spatial_relation = self._empty_spatial_relation()
@@ -398,13 +541,19 @@ class SceneGraphServer:
                 self.depthai_static_instances = []
                 self.wrist_instances = []
                 self.fused_point_cloud = None
+                self._processed_frame_metadata = {}
                 self._request_started_monotonic = time.monotonic()
+                self._request_started_wall_time = time.time()
                 self._request_frame_cutoffs = dict(self._frame_sequences)
+                self._camera_stream_ready_generation = 0
                 pyzlc.info(
-                    f"Waiting for frames received after request_id={request_id}; "
-                    f"frame cutoffs={self._request_frame_cutoffs}"
+                    f"Resetting camera streams before collecting frames for "
+                    f"request_id={request_id}; "
+                    f"request_timestamp={self._request_started_wall_time:.6f}"
                 )
-                self._frame_condition.notify_all()
+                self._pyzlc_node.loop_manager.submit_loop_task(
+                    self._reset_camera_subscribers(request_generation, request_id)
+                )
             else:
                 pyzlc.info(f"Polling existing request_id: {request_id}")
         if self.goal_key:
@@ -425,6 +574,7 @@ class SceneGraphServer:
             response = {
                 "request_id": request_id,
                 "scene_graph_complete": self.completed_request_id == request_id,
+                "frame_metadata": dict(self._processed_frame_metadata),
                 "spatial_relation": self.spatial_relation
                 if self.completed_request_id == request_id
                 else "",
