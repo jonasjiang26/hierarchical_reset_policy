@@ -2,6 +2,8 @@ import pyzlc
 import cv2
 import numpy as np
 import open3d as o3d
+import threading
+import time
 from pathlib import Path
 from typing import List
 from grounded_sam import GroundedSAM
@@ -35,6 +37,7 @@ class SceneGraphServer:
         self.wrist_processed_for_request = False
         self.fused_point_cloud = None
         self.prompt = str
+        self.goal_key = ""
         self.active_request_id = ""
         self.completed_request_id = ""
         self.spatial_relation = self._empty_spatial_relation()
@@ -43,6 +46,17 @@ class SceneGraphServer:
         self.depthai_static_instances: List[TableInstance] = []
         self.static_instances: List[TableInstance] = []
         self.fused_instances: List[TableInstance] = []
+        self._frame_condition = threading.Condition()
+        self._frame_sequences = {
+            ZED_STATIC_CAM_TOPIC: 0,
+            DEPTHAI_STATIC_CAM_TOPIC: 0,
+            "wrist_cam": 0,
+        }
+        self._latest_frame_slots = {}
+        self._request_frame_cutoffs = dict(self._frame_sequences)
+        self._request_started_monotonic = 0.0
+        self._request_generation = 0
+        self._frame_worker_running = True
         pyzlc.info(f"Forcing {ZED_STATIC_CAM_TOPIC} subscriber to use TCP transport.")
         pyzlc.get_node("robot_lab_robotiq_202").subscriber_manager.local_ip = ""
         pyzlc.register_subscriber_handler(
@@ -71,168 +85,201 @@ class SceneGraphServer:
         )
         pyzlc.info("Loading GroundedSAM during scene_graph initialization.")
         self.grounded_sam = GroundedSAM()
+        self._frame_worker = threading.Thread(
+            target=self._frame_worker_loop,
+            name="scene-graph-frame-worker",
+            daemon=True,
+        )
+        self._frame_worker.start()
 
     def zed_static_cam_callback(self, frame):
-        # """Example callback for image data."""
-        try:
-            frame = self._normalize_depth_frame(frame)
-            self.latest_frame = frame
-            self.latest_static_frame = frame
-            self.latest_zed_static_frame = frame
-
-            if not self.requested or self.zed_static_processed_for_request:
-                return None
-
-            self.zed_static_processed_for_request = True
-            masks, phrases = self.process_frame(frame, visualize_masks=False)
-            pyzlc.info(f"Processed {ZED_STATIC_CAM_TOPIC} frame")
-            if masks is None:
-                self._try_fuse_instances()
-                return {"success": False, "message": "no masks detected"}
-
-            self.zed_static_instances = []
-            for mask, phrase in zip(masks, phrases):
-                if phrase:
-                    instance = TableInstance(
-                        phrase,
-                        mask,
-                        rgb=frame['rgb_data'],
-                        depth=frame['depth_data'],
-                        width=frame['width'],
-                        height=frame['height'],
-                        channels=frame['channels'],
-                    )
-                    self.zed_static_instances.append(instance)
-            self._refresh_static_instances()
-            pyzlc.info(f"created {len(self.zed_static_instances)} {ZED_STATIC_CAM_TOPIC} instances.")
-            self._project_instances_in_base(
-                self.zed_static_instances,
-                config_path=ZED_STATIC_CAM_CONFIG,
-                T_base_hand=None,
-                camera_name=ZED_STATIC_CAM_TOPIC,
-                filter=False
-            )
-            self._try_fuse_instances()
-
-            return {
-                "success": True,
-                "phrases": phrases,
-                "num_masks": len(phrases),
-            }
-        except Exception as exc:
-            pyzlc.error(f"{ZED_STATIC_CAM_TOPIC} callback failed: {exc}")
-            pyzlc.error(traceback.format_exc())
-            return {"success": False, "message": str(exc)}
+        self._store_latest_camera_frame(ZED_STATIC_CAM_TOPIC, frame)
+        return None
 
     def depthai_static_cam_callback(self, frame):
-        try:
-            frame = self._normalize_depth_frame(frame)
-            self.latest_frame = frame
-            self.latest_depthai_static_frame = frame
+        self._store_latest_camera_frame(DEPTHAI_STATIC_CAM_TOPIC, frame)
+        return None
 
-            if not self.requested or self.depthai_static_processed_for_request:
-                return None
-
-            self.depthai_static_processed_for_request = True
-            masks, phrases = self.process_frame(frame, visualize_masks=False, convert_rgb_to_bgr=True)
-            pyzlc.info(f"Processed {DEPTHAI_STATIC_CAM_TOPIC} frame")
-            if masks is None:
-                self._try_fuse_instances()
-                return {"success": False, "message": "no masks detected"}
-
-            self.depthai_static_instances = []
-            for mask, phrase in zip(masks, phrases):
-                if phrase:
-                    instance = TableInstance(
-                        phrase,
-                        mask,
-                        rgb=frame['rgb_data'],
-                        depth=frame['depth_data'],
-                        width=frame['width'],
-                        height=frame['height'],
-                        channels=frame['channels'],
-                    )
-                    self.depthai_static_instances.append(instance)
-            self._refresh_static_instances()
-            pyzlc.info(f"created {len(self.depthai_static_instances)} {DEPTHAI_STATIC_CAM_TOPIC} instances.")
-            self._project_instances_in_base(
-                self.depthai_static_instances,
-                config_path=DEPTHAI_STATIC_CAM_CONFIG,
-                T_base_hand=None,
-                camera_name=DEPTHAI_STATIC_CAM_TOPIC,
-                filter=False
-            )
-            self._try_fuse_instances()
-
-            return {
-                "success": True,
-                "phrases": phrases,
-                "num_masks": len(phrases),
-            }
-        except Exception as exc:
-            pyzlc.error(f"{DEPTHAI_STATIC_CAM_TOPIC} callback failed: {exc}")
-            pyzlc.error(traceback.format_exc())
-            return {"success": False, "message": str(exc)}
-            
     def wrist_cam_callback(self, frame):
-        # """Example callback for image data."""
-        try:
-            self.latest_frame = frame
-            self.latest_wrist_frame = frame
-
-            if not self.requested or self.wrist_processed_for_request:
-                return None
-
-            if self.latest_T_base_hand is None:
-                pyzlc.warning("Cannot process wrist_cam yet: no FrankaPanda/franka_arm_state received.")
-                return {"success": False, "message": "no arm_state received yet"}
-
-            T_base_hand = self.latest_T_base_hand.copy()
-            self.wrist_processed_for_request = True
-            masks, phrases = self.process_frame(frame, visualize_masks=False, convert_rgb_to_bgr=True)
-            if masks is None:
-                self._try_fuse_instances()
-                return {"success": False, "message": "no masks detected"}
-
-            self.wrist_instances = []
-            for mask, phrase in zip(masks, phrases):
-                instance = TableInstance(
-                    phrase,
-                    mask,
-                    rgb=frame['rgb_data'],
-                    depth=frame['depth_data'],
-                    width=frame['width'],
-                    height=frame['height'],
-                    channels=frame['channels'],
-                )
-                self.wrist_instances.append(instance)
-            pyzlc.info(f"created {len(self.wrist_instances)} wrist_cam instances.")
-            self._project_instances_in_base(
-                self.wrist_instances,
-                config_path=WRIST_CAM_CONFIG,
-                T_base_hand=T_base_hand,
-                camera_name="wrist_cam",
-                filter=False
-            )
-            self._try_fuse_instances()
-
-            return None
-        except Exception as exc:
-            pyzlc.error(f"wrist_cam_callback failed: {exc}")
-            pyzlc.error(traceback.format_exc())
-            return {"success": False, "message": str(exc)}
+        self._store_latest_camera_frame("wrist_cam", frame)
+        return None
 
     def panda_arm_state_callback(self, arm_state):
         try:
-            self.latest_arm_state = arm_state
-            self.latest_T_base_hand = TableInstance.arm_state_to_base_hand_transform(arm_state)
+            T_base_hand = TableInstance.arm_state_to_base_hand_transform(arm_state)
+            with self._frame_condition:
+                self.latest_arm_state = arm_state
+                self.latest_T_base_hand = T_base_hand
+                self._frame_condition.notify_all()
         except Exception as exc:
             pyzlc.error(f"Failed to parse FrankaPanda/franka_arm_state: {exc}")
             pyzlc.error(traceback.format_exc())
         return None
 
+    def _store_latest_camera_frame(self, topic, frame):
+        received_at = time.monotonic()
+        with self._frame_condition:
+            sequence = self._frame_sequences[topic] + 1
+            self._frame_sequences[topic] = sequence
+            self._latest_frame_slots[topic] = {
+                "frame": frame,
+                "sequence": sequence,
+                "received_at": received_at,
+            }
+            self.latest_frame = frame
+            if topic == ZED_STATIC_CAM_TOPIC:
+                self.latest_static_frame = frame
+                self.latest_zed_static_frame = frame
+            elif topic == DEPTHAI_STATIC_CAM_TOPIC:
+                self.latest_depthai_static_frame = frame
+            elif topic == "wrist_cam":
+                self.latest_wrist_frame = frame
+            self._frame_condition.notify_all()
 
-    def process_frame(self, frame, visualize_masks=False, convert_rgb_to_bgr=False):
+    def _frame_worker_loop(self):
+        while True:
+            with self._frame_condition:
+                job = self._claim_next_frame_job_locked()
+                while self._frame_worker_running and job is None:
+                    self._frame_condition.wait()
+                    job = self._claim_next_frame_job_locked()
+                if not self._frame_worker_running:
+                    return
+
+            self._process_frame_job(job)
+
+    def _claim_next_frame_job_locked(self):
+        if not self.requested:
+            return None
+
+        topic_settings = (
+            (
+                ZED_STATIC_CAM_TOPIC,
+                "zed_static_processed_for_request",
+                False,
+                ZED_STATIC_CAM_CONFIG,
+                "zed_static_instances",
+            ),
+            (
+                DEPTHAI_STATIC_CAM_TOPIC,
+                "depthai_static_processed_for_request",
+                True,
+                DEPTHAI_STATIC_CAM_CONFIG,
+                "depthai_static_instances",
+            ),
+            (
+                "wrist_cam",
+                "wrist_processed_for_request",
+                True,
+                WRIST_CAM_CONFIG,
+                "wrist_instances",
+            ),
+        )
+
+        for topic, processed_attr, convert_rgb_to_bgr, config_path, instances_attr in topic_settings:
+            if getattr(self, processed_attr):
+                continue
+
+            slot = self._latest_frame_slots.get(topic)
+            if slot is None:
+                continue
+            if slot["sequence"] <= self._request_frame_cutoffs.get(topic, 0):
+                continue
+            if slot["received_at"] <= self._request_started_monotonic:
+                continue
+
+            T_base_hand = None
+            if topic == "wrist_cam":
+                if self.latest_T_base_hand is None:
+                    continue
+                T_base_hand = self.latest_T_base_hand.copy()
+
+            setattr(self, processed_attr, True)
+            return {
+                "topic": topic,
+                "frame": slot["frame"],
+                "sequence": slot["sequence"],
+                "received_at": slot["received_at"],
+                "request_id": self.active_request_id,
+                "request_generation": self._request_generation,
+                "prompt": self.prompt,
+                "convert_rgb_to_bgr": convert_rgb_to_bgr,
+                "config_path": config_path,
+                "instances_attr": instances_attr,
+                "T_base_hand": T_base_hand,
+            }
+
+        return None
+
+    def _process_frame_job(self, job):
+        topic = job["topic"]
+        frame = job["frame"]
+        request_generation = job["request_generation"]
+        try:
+            frame = self._normalize_depth_frame(frame)
+            pyzlc.info(
+                f"Processing fresh {topic} frame for request_id={job['request_id']}: "
+                f"sequence={job['sequence']}, timestamp={frame.get('timestamp')}"
+            )
+            masks, phrases = self.process_frame(
+                frame,
+                visualize_masks=False,
+                convert_rgb_to_bgr=job["convert_rgb_to_bgr"],
+                prompt=job["prompt"],
+            )
+
+            instances = []
+            if masks is not None:
+                for mask, phrase in zip(masks, phrases):
+                    if phrase:
+                        instances.append(
+                            TableInstance(
+                                phrase,
+                                mask,
+                                rgb=frame["rgb_data"],
+                                depth=frame["depth_data"],
+                                width=frame["width"],
+                                height=frame["height"],
+                                channels=frame["channels"],
+                            )
+                        )
+                self._project_instances_in_base(
+                    instances,
+                    config_path=job["config_path"],
+                    T_base_hand=job["T_base_hand"],
+                    camera_name=topic,
+                    filter=False,
+                )
+
+            with self._frame_condition:
+                if request_generation != self._request_generation:
+                    pyzlc.info(
+                        f"Discarding {topic} result from superseded "
+                        f"request_id={job['request_id']}."
+                    )
+                    return
+                setattr(self, job["instances_attr"], instances)
+                self._refresh_static_instances()
+
+            pyzlc.info(f"Created {len(instances)} {topic} instances.")
+            self._try_fuse_instances(expected_generation=request_generation)
+        except Exception as exc:
+            pyzlc.error(f"{topic} frame worker failed: {exc}")
+            pyzlc.error(traceback.format_exc())
+            with self._frame_condition:
+                if request_generation != self._request_generation:
+                    return
+                setattr(self, job["instances_attr"], [])
+                self._refresh_static_instances()
+            self._try_fuse_instances(expected_generation=request_generation)
+
+    def process_frame(
+        self,
+        frame,
+        visualize_masks=False,
+        convert_rgb_to_bgr=False,
+        prompt=None,
+    ):
         pyzlc.info(f"Received image frame keys: {list(frame.keys())}")
         pyzlc.info(f"Received image frame with timestamp: {frame['timestamp']}")
         width = frame['width']
@@ -249,9 +296,10 @@ class SceneGraphServer:
             else:
                 segmentation_image = np.ascontiguousarray(rgb[:, :, :3][:, :, ::-1])
 
+        prompt = self.prompt if prompt is None else prompt
         masks, phrases = self.grounded_sam.segment(self.grounded_sam.model,
                                                     segmentation_image,
-                                                    self.prompt,
+                                                    prompt,
                                                     0.3,
                                                     0.3,
                                                     "cuda:0",
@@ -259,7 +307,7 @@ class SceneGraphServer:
         pyzlc.info(f"Detected phrases: {phrases}")
         pyzlc.info(f"Number of masks detected: {masks.shape[0]}")
         if masks.shape[0] == 0:
-            pyzlc.warning(f"No masks detected for prompt: {self.prompt}")
+            pyzlc.warning(f"No masks detected for prompt: {prompt}")
             return None, []
 
         #filter out empty phrases and corresponding masks
@@ -332,25 +380,33 @@ class SceneGraphServer:
 
         pyzlc.info(f"Received request: {request}")
         request_id = str(request.get("request_id", ""))
-        if request_id != self.active_request_id:
-            self.active_request_id = request_id
-            self.completed_request_id = ""
-            self.spatial_relation = self._empty_spatial_relation()
-            self.prompt = request.get("prompt", "")
-            self.goal_key = request.get("goal_key", "")
-            self.requested = True
-            self.zed_static_processed_for_request = False
-            self.depthai_static_processed_for_request = False
-            self.wrist_processed_for_request = False
-            self.fused_instances = []
-            self.static_instances = []
-            self.zed_static_instances = []
-            self.depthai_static_instances = []
-            self.wrist_instances = []
-            self.fused_point_cloud = None
-
-        else:
-            pyzlc.info(f"Polling existing request_id: {request_id}")
+        with self._frame_condition:
+            if request_id != self.active_request_id:
+                self._request_generation += 1
+                self.active_request_id = request_id
+                self.completed_request_id = ""
+                self.spatial_relation = self._empty_spatial_relation()
+                self.prompt = request.get("prompt", "")
+                self.goal_key = request.get("goal_key", "")
+                self.requested = True
+                self.zed_static_processed_for_request = False
+                self.depthai_static_processed_for_request = False
+                self.wrist_processed_for_request = False
+                self.fused_instances = []
+                self.static_instances = []
+                self.zed_static_instances = []
+                self.depthai_static_instances = []
+                self.wrist_instances = []
+                self.fused_point_cloud = None
+                self._request_started_monotonic = time.monotonic()
+                self._request_frame_cutoffs = dict(self._frame_sequences)
+                pyzlc.info(
+                    f"Waiting for frames received after request_id={request_id}; "
+                    f"frame cutoffs={self._request_frame_cutoffs}"
+                )
+                self._frame_condition.notify_all()
+            else:
+                pyzlc.info(f"Polling existing request_id: {request_id}")
         if self.goal_key:
             pyzlc.info(f"sending goal pcd: {self.goal_key}")
             for instance in self.fused_instances:
@@ -392,7 +448,12 @@ class SceneGraphServer:
             )
             instance.segmented_point_cloud = instance.segmented_point_cloud
 
-    def _try_fuse_instances(self):
+    def _try_fuse_instances(self, expected_generation=None):
+        if (
+            expected_generation is not None
+            and expected_generation != self._request_generation
+        ):
+            return
         if (
             not self.zed_static_processed_for_request
             or not self.depthai_static_processed_for_request
@@ -424,6 +485,11 @@ class SceneGraphServer:
             pyzlc.warning(
                 f"No projected {ZED_STATIC_CAM_TOPIC}, {DEPTHAI_STATIC_CAM_TOPIC}, or wrist_cam instances were available."
             )
+            if (
+                expected_generation is not None
+                and expected_generation != self._request_generation
+            ):
+                return
             self.spatial_relation = self._empty_spatial_relation()
             self.completed_request_id = self.active_request_id
         else:
@@ -473,13 +539,24 @@ class SceneGraphServer:
                     spatial_relations.append(relation)
                     seen_relations.add(relation)
 
+            if (
+                expected_generation is not None
+                and expected_generation != self._request_generation
+            ):
+                return
             self.spatial_relation = self._build_spatial_relation_graph(spatial_relations)
             self.completed_request_id = self.active_request_id
             pyzlc.info(f"Spatial relations:\n{self.spatial_relation}")
 
             self._visualize_all_fused_point_clouds()
 
-        self.requested = False
+        with self._frame_condition:
+            if (
+                expected_generation is not None
+                and expected_generation != self._request_generation
+            ):
+                return
+            self.requested = False
 
     def _group_projected_instances_by_key(self, instances):
         instances_by_key = {}

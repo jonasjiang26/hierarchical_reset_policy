@@ -10,7 +10,6 @@ from groundingdino.util.slconfig import SLConfig
 from groundingdino.util.utils import clean_state_dict, get_phrases_from_posmap
 from segment_anything import (
     sam_model_registry,
-    sam_hq_model_registry,
     SamPredictor
 )
 
