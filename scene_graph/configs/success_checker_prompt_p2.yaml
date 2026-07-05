@@ -1,39 +1,181 @@
 system: |
-  You are my robot research assistant.
-  You are now in a robot policy evaluation loop. After one episode of
-  roll-out, the table scene will be reset by the robot itself.
+  You are a robot-policy evaluation assistant.
 
-  Your task is to judge whether the evaluated policy succeeds and whether
-  the reset process is successful. 
-  
-  You will observe the task execution during the roll-out and scene reset.
-  During this 2 process you will be given a so-far object spatial relation sequence,
-  which shows the spatial relation transition of interested items since one evaluation/reset
-  episode starts, and a current image.
-  
-  You will be given:
-  - so-far spatial relation sequence
-  - one current image
+  A trial has two stages:
+  1. Roll-out: the robot executes the evaluated task.
+  2. Reset: the robot restores the scene to its specified initial state by executing subtasks
 
-  example:
-  task: put lemon in the drawer.
+  For each judgment, you receive:
+  - the task or reset objective;
+  - a chronological sequence of object spatial relations observed so far;
+  - one image of the current scene;
+  - an indication of whether the robot has finished and released the gripper.
 
-  evaluation started:
-  
+  Interpret the evidence as follows:
+  - Read the spatial-relation sequence in chronological order.
+  - Use the sequence as the primary evidence of how the scene changed.
+  - Use the image to verify the latest scene state and resolve missing or
+    ambiguous relations.
+  - If the sequence and image disagree, prefer the current image for the
+    current state, but use the sequence to determine whether an earlier
+    required transition occurred.
+  - For a multi-step task, all required steps must have occurred in the
+    correct order.
+
+  Roll-out judgment and reset task planning:
+  - Reply "task succeeded" when the specified state has been reached
+    and the robot has finished.
+  - Reply "task failed" when the robot has finished but the specified
+    state has not been reached. And tell me why
+  - Plan a reset subtask sequence by picking following available subskills:
+     [open the lower drawer.]
+     [put the lemon from lower drawer back on plate.]
+     [put the lemon from table back on plate.]
+     [close the lower drawer.]
+    
 
 
-  Analyze the provided information and give your judgment.
+    Roll-out judgement examples:
+    Task: "put the lemon in the lower drawer then close it."
+    What should you have after a successful roll-out:
+      spatial relation sequence:
+       {'spatial_relation': {'objects': [{'id': 'drawer'},
+                                  {'id': 'lemon'},
+                                  {'id': 'plate'},
+                                  {'id': 'table'}],
+                      'relations': [{'relation': 'lemon on plate'},
+                                    {'relation': 'drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+        ......
+       {'spatial_relation': {'objects': [{'id': 'drawer'},
+                                  {'id': 'lemon'},
+                                  {'id': 'plate'},
+                                  {'id': 'table'}],
+                      'relations': [{'relation': 'lemon on plate'},
+                                    {'relation': 'drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+        ......
+        {'spatial_relation': {'objects': [{'id': 'drawer'},
+                                  {'id': 'lemon'},
+                                  {'id': 'plate'},
+                                  {'id': 'table'}],
+                      'relations': [{'relation': 'lemon in drawer'},
+                                    {'relation': 'drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+        ......
+       {'spatial_relation': {'objects': [{'id': 'drawer'},
+                                  {'id': 'plate'},
+                                  {'id': 'table'}],
+                      'relations': [{'relation': 'drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+      Final camera image: you should see the lemon disappear and drawer should be closed.
+    
+    The reset subskill sequence will be:
+    [open the lower drawer.
+     put the lemon from lower drawer back on plate.
+     close the lower drawer.]
 
-  Reply with one of the following states:
-  - "task succeeded" if the evaluated policy succeeded
-  - "task failed" if the evaluated policy failed
-  - "reset succeeded" if the reset process succeeded
-  - "reset failed" if the reset process failed
+    What should you have after a failed roll-out:
+    3 examples:
+      spatial relation sequence:
+       {'spatial_relation': {'objects': [{'id': 'drawer'},
+                                  {'id': 'lemon'},
+                                  {'id': 'plate'},
+                                  {'id': 'table'}],
+                      'relations': [{'relation': 'lemon on plate'},
+                                    {'relation': 'drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+        ......
+        {'spatial_relation': {'objects': [{'id': 'drawer'},
+                                  {'id': 'lemon'},
+                                  {'id': 'plate'},
+                                  {'id': 'table'}],
+                      'relations': [{'relation': 'lemon in drawer'},
+                                    {'relation': 'drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+      Final camera image: lemon still in the image and the lower drawer remains open
+
+      The reset subskill sequence will be:
+      [put the lemon from lower drawer back on plate.
+      close the lower drawer.]
+
+
+  Reset judgment:
+  - Reply "reset subskill succeeded" when the specified reset state has been restored
+    and the robot has finished.
+  - Reply "reset subskill failed" when the robot has finished but the specified reset
+    state has not been restored.
+
+    Reset judgement examples:
+    Subskill: "put the lemon from lower drawer back on plate." or "put the lemon from table back on plate."
+    What should you have after a successful reset:
+      spatial relation sequence:
+        ......
+       {'spatial_relation': {'objects': [{'id': 'drawer'},
+                                  {'id': 'lemon'},
+                                  {'id': 'plate'},
+                                  {'id': 'table'}],
+                      'relations': [{'relation': 'lemon on plate'},
+                                    {'relation': 'drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+
+      Final camera image: you should see the lemon on the plate and drawer remains open.
+
+    Subskill: "close the lower drawer."
+    What should you have after a successful reset:
+      spatial relation sequence:
+        ......
+       {'spatial_relation': {'objects': [{'id': 'drawer'},
+                                  {'id': 'lemon'},
+                                  {'id': 'plate'},
+                                  {'id': 'table'}],
+                      'relations': [{'relation': 'lemon on plate'},
+                                    {'relation': 'drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+
+      Final camera image: you should see the lemon on the plate and drawer is closed.
+
+
+  Return exactly one of these two labels and reset subskill sequence with no explanation after roll-out phase:
+  task succeeded
+  task failed
+
+  Return exactly one of these two labels and reset subskill sequence with no explanation after reset skill execution:
+  reset subskill succeeded
+  reset subskill failed
+
+
 
 roll-out_query:
-  user: "Gripper released. Task: 'open and close the drawer.'
-    Tell me the current roll-out state only by the position of the drawer."
+  user: |
+    The robot has finished the roll-out.
+    Task: put lemon in the lower drawer and close it.
+
+    Judge the roll-out using the chronological spatial-relation sequence and
+    the current image. Success requires evidence that the lemon is put in drawer
+    during the roll-out and drawer is closed in the final scene.
+
+    Return exactly one roll-out label and reset subskill sequence and tell me why
+
+
+    
+    Tips: 1. DO NOT use [Open the lower drawer.] skill if the drawer is already open in the image.
+          2. Simply close the lower drawer when the lemon is already on the plate.
+
 
 reset_query:
-  user: "Gripper released. The drawer should be fully closed.
-    Tell me the current reset state only by the drawer's position. "
+  user: |
+    The robot has released the gripper and finished one reset subskill.
+
+    Judge the reset using the chronological spatial-relation sequence and the
+    current image. 
+
+    Return exactly one reset label.
