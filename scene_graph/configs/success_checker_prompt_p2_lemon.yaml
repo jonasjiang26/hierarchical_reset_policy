@@ -57,18 +57,18 @@ roll-out_query:
       spatial relation sequence:
        {
                       'relations': [{'relation': 'lemon on plate'},
-                                    {'relation': 'drawer on table'},
+                                    {'relation': 'closed drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
         ......
         {
                       'relations': [{'relation': 'lemon in drawer'},
-                                    {'relation': 'drawer on table'},
+                                    {'relation': 'opened drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
         ......
        {
-                      'relations': [{'relation': 'drawer on table'},
+                      'relations': [{'relation': 'closed drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
     
@@ -82,14 +82,14 @@ roll-out_query:
       spatial relation sequence:
        {
                       'relations': [{'relation': 'lemon on plate'},
-                                    {'relation': 'drawer on table'},
+                                    {'relation': 'closed drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
         ......
 
         {
                       'relations': [{'relation': 'lemon in drawer'},
-                                    {'relation': 'drawer on table'},
+                                    {'relation': 'opened drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
 
@@ -100,13 +100,13 @@ roll-out_query:
       spatial relation sequence:
        {
                       'relations': [{'relation': 'lemon on plate'},
-                                    {'relation': 'drawer on table'},
+                                    {'relation': 'closed drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
         ......
         {
                       'relations': [{'relation': 'lemon on table'},
-                                    {'relation': 'drawer on table'},
+                                    {'relation': 'opened drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
 
@@ -117,13 +117,13 @@ roll-out_query:
       spatial relation sequence:
        { 
                       'relations': [{'relation': 'lemon on plate'},
-                                    {'relation': 'drawer on table'},
+                                    {'relation': 'closed drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
         ......
         {
                       'relations': [{'relation': 'lemon on plate'},
-                                    {'relation': 'drawer on table'},
+                                    {'relation': 'opened drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
 
@@ -152,13 +152,13 @@ reset_query:
       spatial relation sequence:
        {
                       'relations': [{'relation': 'lemon in lower drawer'},
-                                    {'relation': 'drawer on table'},
+                                    {'relation': 'opened drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
         ......
        {
                       'relations': [{'relation': 'lemon on plate'},
-                                    {'relation': 'drawer on table'},
+                                    {'relation': 'opened drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
 
@@ -166,26 +166,26 @@ reset_query:
       spatial relation sequence:
        {
                       'relations': [{'relation': 'lemon on table'},
-                                    {'relation': 'drawer on table'},
+                                    {'relation': 'opened drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
         ......
        {
                       'relations': [{'relation': 'lemon on plate'},
-                                    {'relation': 'drawer on table'},
+                                    {'relation': 'opened drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
 
     Subskill: "open the lower drawer."
       spatial relation sequence:
        {
-                      'relations': [{'relation': 'drawer on table'},
+                      'relations': [{'relation': 'closed drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
         ......
        {
                       'relations': [{'relation': 'lemon in drawer'},
-                                    {'relation': 'drawer on table'},
+                                    {'relation': 'opened drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
 
@@ -193,13 +193,13 @@ reset_query:
       spatial relation sequence:
        {
                       'relations': [{'relation': 'lemon on plate'},
-                                    {'relation': 'drawer on table'},
+                                    {'relation': 'opened drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
         ......
        {
                       'relations': [{'relation': 'lemon on plate'},
-                                    {'relation': 'drawer on table'},
+                                    {'relation': 'closed drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
 

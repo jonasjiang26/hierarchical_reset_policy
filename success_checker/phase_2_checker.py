@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import io
 import json
 import os
 import re
@@ -15,13 +17,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pyzlc
 import yaml
+from PIL import Image
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROMPT_PATH = (
-    REPO_ROOT / "scene_graph" / "configs" / "success_checker_prompt_p2_no_img.yaml"
+    REPO_ROOT / "scene_graph" / "configs" / "success_checker_prompt_p2_lemon.yaml"
 )
 DEFAULT_NODE_IP = "141.3.53.25"
 DEFAULT_GROUP_NAME = "robot_lab_robotiq_202"
@@ -32,14 +36,18 @@ DEFAULT_ROLLOUT_TOPIC = "roll-out state"
 DEFAULT_RESET_TOPIC = "reset state"
 DEFAULT_RESET_SEQUENCE_TOPIC = "reset sequence"
 DEFAULT_RESET_FAILURE_TOPIC = "reset checker state"
-DEFAULT_SCENE_PROMPT = "drawer. plate. lemon."
+DEFAULT_STATIC_CAM_TOPIC = "static_cam"
+DEFAULT_SCENE_PROMPT = "pot. carrot. stove. lid."
 DEFAULT_LLM_URL = "https://ki-toolbox.scc.kit.edu/api/v1/chat/completions"
-DEFAULT_MODEL = "kit.gpt-oss-120b"
+DEFAULT_MODEL = "kit.qwen3.5-397b-A17b"
+DEFAULT_FRAME_TIMEOUT = 5.0
+DEFAULT_MAX_FRAME_AGE = 2.0
+DEFAULT_CAMERA_CLOCK_SKEW = 0.25
+DEFAULT_LATEST_FRAME_WINDOW = 0.15
 RESET_SUBSKILLS = (
-    "open the lower drawer.",
-    "put the lemon from lower drawer back on plate.",
-    "put the lemon from table back on plate.",
-    "close the lower drawer.",
+    "put lid back in place.",
+    "put carrot back in sink.",
+    "put pot back in place.",
 )
 
 
@@ -61,13 +69,20 @@ class Phase2SuccessChecker:
         llm_url: str = DEFAULT_LLM_URL,
         model: str = DEFAULT_MODEL,
         group_name: str = DEFAULT_GROUP_NAME,
+        static_cam_topic: str = DEFAULT_STATIC_CAM_TOPIC,
         scene_graph_service: str = DEFAULT_SCENE_GRAPH_SERVICE,
         scene_prompt: str = DEFAULT_SCENE_PROMPT,
         sample_interval: float = 1.0,
         service_call_timeout: float = 10.0,
         scene_request_timeout: float = 60.0,
+        frame_timeout: float = DEFAULT_FRAME_TIMEOUT,
+        max_frame_age: float = DEFAULT_MAX_FRAME_AGE,
+        camera_clock_skew: float = DEFAULT_CAMERA_CLOCK_SKEW,
+        latest_frame_window: float = DEFAULT_LATEST_FRAME_WINDOW,
         llm_timeout: float = 60.0,
         max_tokens: int = 2048,
+        jpeg_quality: int = 90,
+        input_color_order: str = "bgr",
         api_key: str | None = None,
         reset_sequence_publisher: Any | None = None,
         reset_failure_publisher: Any | None = None,
@@ -76,13 +91,20 @@ class Phase2SuccessChecker:
         self.llm_url = llm_url
         self.model = model
         self.group_name = group_name
+        self.static_cam_topic = static_cam_topic
         self.scene_graph_service = scene_graph_service
         self.scene_prompt = scene_prompt
         self.sample_interval = sample_interval
         self.service_call_timeout = service_call_timeout
         self.scene_request_timeout = scene_request_timeout
+        self.frame_timeout = frame_timeout
+        self.max_frame_age = max_frame_age
+        self.camera_clock_skew = camera_clock_skew
+        self.latest_frame_window = latest_frame_window
         self.llm_timeout = llm_timeout
         self.max_tokens = max_tokens
+        self.jpeg_quality = jpeg_quality
+        self.input_color_order = input_color_order
         if not api_key or not api_key.strip():
             raise ValueError("An API key is required for the LLM server.")
         self.api_key = api_key.strip()
@@ -91,9 +113,57 @@ class Phase2SuccessChecker:
 
         self._session: EvaluationSession | None = None
         self._session_lock = threading.Lock()
+        self._subscription_started_at = time.time()
+        self._latest_static_frame: Mapping[str, Any] | None = None
+        self._latest_frame_age_at_receive: float | None = None
+        self._frame_event = threading.Event()
+        self._frame_lock = threading.Lock()
         self._request_fn = getattr(pyzlc, "call", None) or getattr(
             pyzlc, "zlc_request"
         )
+
+    def static_cam_callback(self, frame: Mapping[str, Any]) -> None:
+        """Store the newest fresh static-camera frame for the next LLM request."""
+        received_at = time.time()
+        capture_time = self._capture_time(frame)
+        if capture_time is None:
+            pyzlc.warning(
+                "Ignoring static-camera frame with invalid timestamp: "
+                f"{frame.get('timestamp')!r}"
+            )
+            return None
+
+        frame_age = received_at - capture_time
+        if frame_age < -self.camera_clock_skew:
+            pyzlc.warning(
+                "Ignoring static-camera frame timestamped too far in the future: "
+                f"timestamp={capture_time:.6f}, age={frame_age:.3f}s"
+            )
+            return None
+        if capture_time < self._subscription_started_at - self.camera_clock_skew:
+            pyzlc.warning(
+                "Ignoring pre-subscription static-camera frame: "
+                f"timestamp={capture_time:.6f}, "
+                f"subscription_timestamp={self._subscription_started_at:.6f}, "
+                f"age={frame_age:.3f}s"
+            )
+            return None
+        if frame_age > self.max_frame_age:
+            pyzlc.warning(
+                "Ignoring delayed static-camera frame: "
+                f"timestamp={capture_time:.6f}, age={frame_age:.3f}s, "
+                f"maximum_age={self.max_frame_age:.3f}s"
+            )
+            return None
+
+        with self._frame_lock:
+            current_timestamp = self._capture_time(self._latest_static_frame)
+            if current_timestamp is not None and capture_time <= current_timestamp:
+                return None
+            self._latest_static_frame = frame
+            self._latest_frame_age_at_receive = frame_age
+            self._frame_event.set()
+        return None
 
     def rollout_state_callback(self, message: Any) -> None:
         print(f"roll-out state message: {message}", flush=True)
@@ -232,26 +302,50 @@ class Phase2SuccessChecker:
                 f"{session.kind.capitalize()} ended with "
                 f"{len(relation_sequence)} relation samples. Sending them to the LLM."
             )
-            messages = self._build_messages(session, relation_sequence)
+            image_url = self._build_image()
+            messages = self._build_messages(session, relation_sequence, image_url)
             response = self._send_chat_completion(messages)
             print("\nLLM response:", flush=True)
             print(response, flush=True)
             pyzlc.info(f"Phase-2 {session.kind} LLM response: {response}")
             if session.kind == "rollout":
                 self._publish_reset_sequence(response)
-            elif response.strip().lower() == "reset subskill failed":
-                self._publish_reset_failure()
+            else:
+                reset_outcome = self._reset_outcome(response)
+                if reset_outcome == "reset subskill failed":
+                    self._publish_reset_failure()
+                elif reset_outcome == "reset subskill succeeded":
+                    self._publish_reset_success()
+                else:
+                    raise ValueError(
+                        "The reset LLM response did not contain exactly one "
+                        f"recognized reset outcome: {response!r}"
+                    )
         except Exception as exc:
             pyzlc.error(f"Phase-2 {session.kind} evaluation failed: {exc}")
             pyzlc.error(traceback.format_exc())
 
+    @staticmethod
+    def _reset_outcome(llm_response: str) -> str | None:
+        response_text = llm_response.strip().lower()
+        outcomes = ("reset subskill succeeded", "reset subskill failed")
+        matches = [outcome for outcome in outcomes if outcome in response_text]
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    def _publish_reset_success(self) -> None:
+        self._publish_reset_checker_state("reset subskill succeeded")
+
     def _publish_reset_failure(self) -> None:
+        self._publish_reset_checker_state("reset subskill failed")
+
+    def _publish_reset_checker_state(self, message: str) -> None:
         if self.reset_failure_publisher is None:
-            raise RuntimeError("Reset-failure publisher is not configured.")
-        message = "reset subskill failed"
+            raise RuntimeError("Reset-checker-state publisher is not configured.")
         self.reset_failure_publisher.publish(message)
-        print(f"Published reset failure: {message}", flush=True)
-        pyzlc.info(f"Published reset failure: {message}")
+        print(f"Published reset checker state: {message}", flush=True)
+        pyzlc.info(f"Published reset checker state: {message}")
 
     def _publish_reset_sequence(self, llm_response: str) -> None:
         if self.reset_sequence_publisher is None:
@@ -285,7 +379,8 @@ class Phase2SuccessChecker:
         self,
         session: EvaluationSession,
         relation_sequence: list[dict[str, list[dict[str, Any]]]],
-    ) -> list[dict[str, str]]:
+        image_url: str,
+    ) -> list[dict[str, Any]]:
         query_key = "roll-out_query" if session.kind == "rollout" else "reset_query"
         objective_text = ""
         if session.kind == "reset":
@@ -293,15 +388,133 @@ class Phase2SuccessChecker:
         sequence_text = json.dumps(relation_sequence, indent=2, ensure_ascii=False)
         user_prompt = (
             f"{self._prompt_text(query_key)}{objective_text}\n\n"
-        
             f"{sequence_text}"
         )
         return [
             {"role": "system", "content": self._prompt_text("system")},
-            {"role": "user", "content": user_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_prompt},
+                    # {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            },
         ]
 
-    def _send_chat_completion(self, messages: list[dict[str, str]]) -> str:
+    def _build_image(self) -> str:
+        frame = self._get_current_static_frame()
+        capture_time = self._capture_time(frame)
+        current_age = (
+            time.time() - capture_time
+            if capture_time is not None
+            else float("nan")
+        )
+        pyzlc.info(
+            "Using current static-camera frame for Phase-2 LLM request: "
+            f"timestamp={frame.get('timestamp')!r}, "
+            f"size={frame.get('width')}x{frame.get('height')}, "
+            f"age_at_receive={self._latest_frame_age_at_receive}, "
+            f"current_age={current_age:.3f}s"
+        )
+        return self._frame_to_jpeg_data_url(frame)
+
+    def _get_current_static_frame(self) -> Mapping[str, Any]:
+        self._frame_event.clear()
+        pyzlc.info(f"Waiting for a current frame from {self.static_cam_topic!r}.")
+        if not self._frame_event.wait(timeout=self.frame_timeout):
+            raise TimeoutError(
+                f"No fresh static-camera frame was received from "
+                f"{self.static_cam_topic!r} within {self.frame_timeout:.1f}s."
+            )
+
+        # Keep receiving briefly after the first acceptable frame. The callback
+        # overwrites the slot with increasing camera timestamps, so this returns
+        # the newest frame observed in the window.
+        time.sleep(min(self.latest_frame_window, self.frame_timeout))
+
+        with self._frame_lock:
+            frame = self._latest_static_frame
+
+        if frame is None:
+            raise RuntimeError("The static-camera callback completed without a frame.")
+        return frame
+
+    def _frame_to_jpeg_data_url(self, frame: Mapping[str, Any]) -> str:
+        width = int(frame["width"])
+        height = int(frame["height"])
+        channels = int(frame.get("channels", 3))
+        rgb_data = frame["rgb_data"]
+
+        if not 1 <= self.jpeg_quality <= 100:
+            raise ValueError(
+                f"jpeg_quality must be between 1 and 100: {self.jpeg_quality}"
+            )
+
+        try:
+            raw_bytes = bytes(rgb_data)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                f"rgb_data must be bytes-like. Got: {type(rgb_data).__name__}"
+            ) from exc
+
+        expected_size = height * width * channels
+        if len(raw_bytes) != expected_size:
+            raise ValueError(
+                f"Camera image has {len(raw_bytes)} bytes, expected {expected_size} "
+                f"for shape ({height}, {width}, {channels})."
+            )
+
+        if channels == 1:
+            pil_image = Image.frombytes("L", (width, height), raw_bytes)
+        elif channels >= 3:
+            if channels == 3:
+                image = Image.frombytes("RGB", (width, height), raw_bytes)
+            elif channels == 4:
+                image = Image.frombytes("RGBA", (width, height), raw_bytes)
+            else:
+                image_array = np.frombuffer(raw_bytes, dtype=np.uint8).reshape(
+                    (height, width, channels)
+                )
+                image = Image.fromarray(
+                    np.array(image_array[:, :, :3], dtype=np.uint8, copy=True),
+                    mode="RGB",
+                )
+
+            if self.input_color_order == "bgr":
+                red, green, blue = image.convert("RGB").split()
+                pil_image = Image.merge("RGB", (blue, green, red))
+            else:
+                pil_image = image.convert("RGB")
+        else:
+            raise ValueError(f"Unsupported camera channel count: {channels}")
+
+        encoded = io.BytesIO()
+        pil_image.save(encoded, format="JPEG", quality=self.jpeg_quality)
+        image_b64 = base64.b64encode(encoded.getvalue()).decode("ascii")
+        return f"data:image/jpeg;base64,{image_b64}"
+
+    @staticmethod
+    def _capture_time(frame: Mapping[str, Any] | None) -> float | None:
+        if frame is None:
+            return None
+        timestamp = frame.get("timestamp")
+        if isinstance(timestamp, bool) or timestamp is None:
+            return None
+        try:
+            raw_capture_time = float(timestamp)
+        except (TypeError, ValueError):
+            return None
+
+        # Camera publishers may encode Unix time in seconds, milliseconds,
+        # microseconds, or nanoseconds. Normalize all four to seconds so they
+        # can be compared with time.time().
+        for units_per_second in (1.0, 1_000.0, 1_000_000.0, 1_000_000_000.0):
+            capture_time = raw_capture_time / units_per_second
+            if 1_000_000_000.0 <= capture_time <= 10_000_000_000.0:
+                return capture_time
+        return None
+
+    def _send_chat_completion(self, messages: list[dict[str, Any]]) -> str:
         payload = {
             "model": self.model,
             "messages": messages,
@@ -426,16 +639,46 @@ def main() -> None:
     parser.add_argument(
         "--reset-failure-topic", default=DEFAULT_RESET_FAILURE_TOPIC
     )
+    parser.add_argument("--static-cam-topic", default=DEFAULT_STATIC_CAM_TOPIC)
     parser.add_argument("--scene-graph-service", default=DEFAULT_SCENE_GRAPH_SERVICE)
     parser.add_argument("--scene-prompt", default=DEFAULT_SCENE_PROMPT)
     parser.add_argument("--prompt-path", type=Path, default=DEFAULT_PROMPT_PATH)
     parser.add_argument("--sample-interval", type=float, default=1.0)
     parser.add_argument("--service-call-timeout", type=float, default=10.0)
     parser.add_argument("--scene-request-timeout", type=float, default=60.0)
+    parser.add_argument("--frame-timeout", type=float, default=DEFAULT_FRAME_TIMEOUT)
+    parser.add_argument(
+        "--max-frame-age",
+        type=float,
+        default=DEFAULT_MAX_FRAME_AGE,
+        help="Reject camera frames older than this many seconds.",
+    )
+    parser.add_argument(
+        "--camera-clock-skew",
+        type=float,
+        default=DEFAULT_CAMERA_CLOCK_SKEW,
+        help="Allowed camera/server clock difference in seconds.",
+    )
+    parser.add_argument(
+        "--latest-frame-window",
+        type=float,
+        default=DEFAULT_LATEST_FRAME_WINDOW,
+        help=(
+            "After the first fresh frame, keep receiving for this many seconds "
+            "and use the newest timestamp observed."
+        ),
+    )
     parser.add_argument("--llm-url", default=DEFAULT_LLM_URL)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--llm-timeout", type=float, default=60.0)
     parser.add_argument("--max-tokens", type=int, default=2048)
+    parser.add_argument("--jpeg-quality", type=int, default=90)
+    parser.add_argument(
+        "--input-color-order",
+        choices=("bgr", "rgb"),
+        default="bgr",
+        help="Color order used by rgb_data. DepthAI static_cam publishes BGR.",
+    )
     parser.add_argument(
         "--api-key",
         default=os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY"),
@@ -450,12 +693,21 @@ def main() -> None:
         "sample_interval",
         "service_call_timeout",
         "scene_request_timeout",
+        "frame_timeout",
         "llm_timeout",
     ):
         if getattr(args, option) <= 0:
             parser.error(f"--{option.replace('_', '-')} must be positive")
+    if args.max_frame_age <= 0:
+        parser.error("--max-frame-age must be positive")
+    if args.camera_clock_skew < 0:
+        parser.error("--camera-clock-skew cannot be negative")
+    if args.latest_frame_window < 0:
+        parser.error("--latest-frame-window cannot be negative")
     if args.max_tokens <= 0:
         parser.error("--max-tokens must be positive")
+    if not 1 <= args.jpeg_quality <= 100:
+        parser.error("--jpeg-quality must be between 1 and 100")
     if not args.api_key or not args.api_key.strip():
         parser.error(
             "an API key is required; set LLM_API_KEY (or OPENAI_API_KEY), "
@@ -480,27 +732,44 @@ def main() -> None:
         llm_url=args.llm_url,
         model=args.model,
         group_name=args.group_name,
+        static_cam_topic=args.static_cam_topic,
         scene_graph_service=args.scene_graph_service,
         scene_prompt=args.scene_prompt,
         sample_interval=args.sample_interval,
         service_call_timeout=args.service_call_timeout,
         scene_request_timeout=args.scene_request_timeout,
+        frame_timeout=args.frame_timeout,
+        max_frame_age=args.max_frame_age,
+        camera_clock_skew=args.camera_clock_skew,
+        latest_frame_window=args.latest_frame_window,
         llm_timeout=args.llm_timeout,
         max_tokens=args.max_tokens,
+        jpeg_quality=args.jpeg_quality,
+        input_color_order=args.input_color_order,
         api_key=api_key,
         reset_sequence_publisher=reset_sequence_publisher,
         reset_failure_publisher=reset_failure_publisher,
     )
 
+    pyzlc.info(f"Forcing {args.static_cam_topic} subscriber to use TCP transport.")
+    pyzlc.get_node(args.group_name).subscriber_manager.local_ip = ""
     pyzlc.register_subscriber_handler(
         args.rollout_topic, checker.rollout_state_callback, args.group_name
     )
     pyzlc.register_subscriber_handler(
         args.reset_topic, checker.reset_state_callback, args.group_name
     )
+    pyzlc.register_subscriber_handler(
+        args.static_cam_topic,
+        checker.static_cam_callback,
+        args.group_name,
+        buffer_size=1,
+        conflate=True,
+    )
     pyzlc.info(
         f"{args.node_name} subscribed to {args.rollout_topic!r} and "
-        f"{args.reset_topic!r}; sampling {args.scene_graph_service!r} every "
+        f"{args.reset_topic!r}; receiving images from {args.static_cam_topic!r}; "
+        f"sampling {args.scene_graph_service!r} every "
         f"{args.sample_interval:.1f}s and publishing rollout reset plans on "
         f"{args.reset_sequence_topic!r}."
     )

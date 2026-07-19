@@ -443,7 +443,7 @@ class SceneGraphServer:
                                                     segmentation_image,
                                                     prompt,
                                                     0.3,
-                                                    0.3,
+                                                    0.4,
                                                     "cuda:0",
                                                     with_logits=False)
         pyzlc.info(f"Detected phrases: {phrases}")
@@ -655,7 +655,9 @@ class SceneGraphServer:
                     if not heuristics.is_in(instance, chosen_instance):
                         continue
 
-                    relation = f"{instance.name} is in {chosen_instance.name}"
+                    subject_name = heuristics.spatial_relation_instance_name(instance)
+                    target_name = heuristics.spatial_relation_instance_name(chosen_instance)
+                    relation = f"{subject_name} is in {target_name}"
                     if relation and relation not in seen_relations:
                         spatial_relations.append(relation)
                         seen_relations.add(relation)
@@ -671,7 +673,9 @@ class SceneGraphServer:
                     if not heuristics.is_on(instance, chosen_instance):
                         continue
 
-                    relation = f"{instance.name} on {chosen_instance.name}"
+                    subject_name = heuristics.spatial_relation_instance_name(instance)
+                    target_name = heuristics.spatial_relation_instance_name(chosen_instance)
+                    relation = f"{subject_name} on {target_name}"
                     if relation and relation not in seen_relations:
                         spatial_relations.append(relation)
                         seen_relations.add(relation)
@@ -684,7 +688,8 @@ class SceneGraphServer:
                 if not heuristics.is_on_table(instance):
                     continue
 
-                relation = f"{instance.name} on table"
+                subject_name = heuristics.spatial_relation_instance_name(instance)
+                relation = f"{subject_name} on table"
                 if relation and relation not in seen_relations:
                     spatial_relations.append(relation)
                     seen_relations.add(relation)

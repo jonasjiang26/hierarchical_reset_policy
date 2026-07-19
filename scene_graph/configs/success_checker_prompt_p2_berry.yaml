@@ -1,0 +1,197 @@
+system: |
+  You are a robot-policy evaluation assistant.
+
+  A trial has two stages:
+  1. Roll-out: the robot executes the evaluated task.
+  2. Reset: the robot restores the scene to its specified initial state by executing subtasks
+
+  For each judgment, you receive:
+  - the task or reset objective;
+  - a chronological sequence of object spatial relations observed so far;
+  - an indication of whether the robot has finished and released the gripper.
+
+  Interpret the evidence as follows:
+  - Read the spatial-relation sequence in chronological order.
+  - Use the sequence as the primary evidence of how the scene changed.
+  - For a multi-step task, all required steps must have occurred in the
+    correct order.
+
+  Roll-out judgment and reset task planning:
+  - Reply "task succeeded" when the specified state has been reached
+    and the robot has finished.
+  - Reply "task failed" when the robot has finished but the specified
+    state has not been reached. And tell me why
+  - Plan a reset subtask sequence by picking only necessary subskill from following available subskills:
+     [open the lower drawer.]
+     [put the strawberry from plate back in drawer.]
+     [put the strawberry from table back on plate.]
+     [close the lower drawer.]
+    
+  Reset judgment:
+  - Reply "reset subskill succeeded" when the specified reset state has been restored
+    and the robot has finished.
+  - Reply "reset subskill failed" when the robot has finished but the specified reset
+    state has not been restored.
+
+  Return exactly one of these two labels and reset subskill sequence with no explanation after roll-out phase:
+  task succeeded
+  task failed
+
+  Return exactly one of these two labels and reset subskill sequence with no explanation after reset skill execution:
+  reset subskill succeeded
+  reset subskill failed
+
+
+
+roll-out_query:
+  user: |
+    The robot has finished the roll-out.
+    Task: get me the strawberry from lower drawer.
+
+    Judge the roll-out using the chronological spatial-relation sequence. Success requires evidence that the strawberry is put on plate
+    during the roll-out and drawer is closed in the final scene.
+
+   
+    Task: "get me the strawberry from the lower drawer."
+    successful roll-out example:
+      spatial relation sequence:
+       {
+                      'relations': [{'relation': 'closed drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+        ......
+        {
+                      'relations': [{'relation': 'strawberry in drawer'},
+                                    {'relation': 'opened drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+        ......
+
+         {
+                      'relations': [{'relation': 'strawberry on plate'},
+                                    {'relation': 'closed drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+
+    The reset subskill sequence will be:
+    [open the lower drawer.
+     put the strawberry from plate back in drawer.
+     close the lower drawer.]
+
+
+    failed roll-out examples:
+      spatial relation sequence:
+       {
+                      'relations': [{'relation': 'closed drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+        ......
+       {
+                      'relations': [{'relation': 'strawberry in drawer'},
+                                    {'relation': 'opened drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+        ......
+        {
+                      'relations': [{'relation': 'strawberry in drawer'},
+                                    {'relation': 'opened drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+
+      The reset subskill sequence will be:
+      [close the lower drawer.]
+
+      spatial relation sequence:
+       {
+                      'relations': [{'relation': 'closed drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+        ......
+       {
+                      'relations': [{'relation': 'strawberry in drawer'},
+                                    {'relation': 'opened drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+        ......
+        {
+                      'relations': [{'relation': 'strawberry on plate'},
+                                    {'relation': 'opened drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+      The reset subskill sequence will be:
+      [put the strawberry from plate back in drawer.
+      close the lower drawer.]
+    
+    Important rules for task planning:
+    1.If task failed, the drawer should be open. DO NOT use [open the lower drawer.] in reset subskill sequence. 
+    2.If task succeeded, the drawer should be close. need to be opened in reset.
+    3.Pick the most appropriate one of the reset subskill sequences from above examples.
+
+    Return exactly one roll-out label and reset subskill sequence
+
+
+
+
+
+
+reset_query:
+  user: |
+    The robot has released the gripper and finished one reset subskill.
+
+    successful reset examples:
+    Subskill: "put the strawberry from plate back in drawer."
+      spatial relation sequence:
+       {
+                      'relations': [{'relation': 'strawberry on plate'},
+                                    {'relation': 'opened drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+        ......
+       {
+                      'relations': [{'relation': 'strawberry in drawer'},
+                                    {'relation': 'opened drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+
+    Subskill: "put the strawberry from table back in drawer."
+      spatial relation sequence:
+       {
+                      'relations': [{'relation': 'strawberry on table'},
+                                    {'relation': 'opened drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+        ......
+       {
+                      'relations': [{'relation': 'strawberry in drawer'},
+                                    {'relation': 'opened drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+
+    Subskill: "open the lower drawer."
+      spatial relation sequence:
+       {
+                      'relations': [{'relation': 'closed drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+        ......
+       {
+                      'relations': [{'relation': 'opened drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+
+    Subskill: "close the lower drawer."
+      spatial relation sequence:
+       {
+                      'relations': [{'relation': 'strawberry in drawer'},
+                                    {'relation': 'opened drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+        ......
+       {
+                      'relations': [{'relation': 'closed drawer on table'},
+                                    {'relation': 'plate on table'}]}}
+        }
+
+    Judge the reset comparing the chronological spatial-relation sequence with above examples.
+
+    Return exactly one reset label
