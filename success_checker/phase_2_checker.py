@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import socket
 import threading
 import time
 import traceback
@@ -25,7 +26,7 @@ from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROMPT_PATH = (
-    REPO_ROOT / "scene_graph" / "configs" / "success_checker_prompt_p2_lemon.yaml"
+    REPO_ROOT / "scene_graph" / "configs" / "success_checker_prompt_p2_berry.yaml"
 )
 DEFAULT_NODE_IP = "141.3.53.25"
 DEFAULT_GROUP_NAME = "robot_lab_robotiq_202"
@@ -37,17 +38,20 @@ DEFAULT_RESET_TOPIC = "reset state"
 DEFAULT_RESET_SEQUENCE_TOPIC = "reset sequence"
 DEFAULT_RESET_FAILURE_TOPIC = "reset checker state"
 DEFAULT_STATIC_CAM_TOPIC = "static_cam"
-DEFAULT_SCENE_PROMPT = "pot. carrot. stove. lid."
+DEFAULT_SCENE_PROMPT = "strawberry. drawer. plate"
 DEFAULT_LLM_URL = "https://ki-toolbox.scc.kit.edu/api/v1/chat/completions"
-DEFAULT_MODEL = "kit.qwen3.5-397b-A17b"
+DEFAULT_MODEL = "kit.minimax-m2.7-229b"
 DEFAULT_FRAME_TIMEOUT = 5.0
 DEFAULT_MAX_FRAME_AGE = 2.0
 DEFAULT_CAMERA_CLOCK_SKEW = 0.25
 DEFAULT_LATEST_FRAME_WINDOW = 0.15
+DEFAULT_MAX_TOKENS = 512
+DEFAULT_LLM_TIMEOUT = 300.0
 RESET_SUBSKILLS = (
-    "put lid back in place.",
-    "put carrot back in sink.",
-    "put pot back in place.",
+     "open the lower drawer.",
+     "put the strawberry from plate back in drawer.",
+     "put the strawberry from table back in drawer.",
+     "close the lower drawer."
 )
 
 
@@ -79,8 +83,8 @@ class Phase2SuccessChecker:
         max_frame_age: float = DEFAULT_MAX_FRAME_AGE,
         camera_clock_skew: float = DEFAULT_CAMERA_CLOCK_SKEW,
         latest_frame_window: float = DEFAULT_LATEST_FRAME_WINDOW,
-        llm_timeout: float = 60.0,
-        max_tokens: int = 2048,
+        llm_timeout: float = DEFAULT_LLM_TIMEOUT,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
         jpeg_quality: int = 90,
         input_color_order: str = "bgr",
         api_key: str | None = None,
@@ -527,7 +531,7 @@ class Phase2SuccessChecker:
         }
         pyzlc.info(
             f"Sending LLM request to {self.llm_url!r} using model "
-            f"{self.model!r}."
+            f"{self.model!r} with max_tokens={self.max_tokens}."
         )
         request = urllib.request.Request(
             self.llm_url,
@@ -541,6 +545,11 @@ class Phase2SuccessChecker:
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"LLM request failed with HTTP {exc.code}: {body}") from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise RuntimeError(
+                f"Timed out after {self.llm_timeout:.1f}s waiting for the LLM "
+                "response. Increase --llm-timeout or use a shorter prompt."
+            ) from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Could not reach LLM endpoint {self.llm_url!r}: {exc}") from exc
 
@@ -563,7 +572,8 @@ class Phase2SuccessChecker:
             raise RuntimeError(
                 "The LLM exhausted its output budget before producing a final "
                 f"answer (max_tokens={self.max_tokens}, "
-                f"reasoning_chars={reasoning_length}). Increase --max-tokens."
+                f"reasoning_chars={reasoning_length}). Increase --max-tokens "
+                f"(current default is {DEFAULT_MAX_TOKENS}; try --max-tokens 8192)."
             )
         raise RuntimeError(
             "The LLM returned no final message content "
@@ -670,8 +680,8 @@ def main() -> None:
     )
     parser.add_argument("--llm-url", default=DEFAULT_LLM_URL)
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--llm-timeout", type=float, default=60.0)
-    parser.add_argument("--max-tokens", type=int, default=2048)
+    parser.add_argument("--llm-timeout", type=float, default=DEFAULT_LLM_TIMEOUT)
+    parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     parser.add_argument("--jpeg-quality", type=int, default=90)
     parser.add_argument(
         "--input-color-order",

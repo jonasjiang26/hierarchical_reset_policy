@@ -24,7 +24,7 @@ system: |
   - Plan a reset subtask sequence by picking only necessary subskill from following available subskills:
      [open the lower drawer.]
      [put the strawberry from plate back in drawer.]
-     [put the strawberry from table back on plate.]
+     [put the strawberry from table back in drawer.]
      [close the lower drawer.]
     
   Reset judgment:
@@ -61,7 +61,7 @@ roll-out_query:
         }
         ......
         {
-                      'relations': [{'relation': 'strawberry in drawer'},
+                      'relations': [{'relation': 'strawberry in opened drawer'},
                                     {'relation': 'opened drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
@@ -87,13 +87,13 @@ roll-out_query:
         }
         ......
        {
-                      'relations': [{'relation': 'strawberry in drawer'},
+                      'relations': [{'relation': 'strawberry in closed drawer'},
                                     {'relation': 'opened drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
         ......
         {
-                      'relations': [{'relation': 'strawberry in drawer'},
+                      'relations': [{'relation': 'strawberry in opened drawer'},
                                     {'relation': 'opened drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
@@ -108,7 +108,7 @@ roll-out_query:
         }
         ......
        {
-                      'relations': [{'relation': 'strawberry in drawer'},
+                      'relations': [{'relation': 'strawberry in opened drawer'},
                                     {'relation': 'opened drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
@@ -125,9 +125,8 @@ roll-out_query:
     Important rules for task planning:
     1.If task failed, the drawer should be open. DO NOT use [open the lower drawer.] in reset subskill sequence. 
     2.If task succeeded, the drawer should be close. need to be opened in reset.
-    3.Pick the most appropriate one of the reset subskill sequences from above examples.
 
-    Return exactly one roll-out label and reset subskill sequence
+    Return ONLY exactly one roll-out label and reset subskill sequence with NO explaination
 
 
 
@@ -148,7 +147,7 @@ reset_query:
         }
         ......
        {
-                      'relations': [{'relation': 'strawberry in drawer'},
+                      'relations': [{'relation': 'strawberry in opened drawer'},
                                     {'relation': 'opened drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
@@ -162,7 +161,7 @@ reset_query:
         }
         ......
        {
-                      'relations': [{'relation': 'strawberry in drawer'},
+                      'relations': [{'relation': 'strawberry in opened drawer'},
                                     {'relation': 'opened drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
@@ -182,7 +181,7 @@ reset_query:
     Subskill: "close the lower drawer."
       spatial relation sequence:
        {
-                      'relations': [{'relation': 'strawberry in drawer'},
+                      'relations': [{'relation': 'strawberry in opened drawer'},
                                     {'relation': 'opened drawer on table'},
                                     {'relation': 'plate on table'}]}}
         }
@@ -194,4 +193,4 @@ reset_query:
 
     Judge the reset comparing the chronological spatial-relation sequence with above examples.
 
-    Return exactly one reset label
+    Return ONLY exactly one reset label with NO explaination

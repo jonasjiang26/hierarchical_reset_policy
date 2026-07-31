@@ -28,10 +28,12 @@ DEFAULT_GROUP_NAME = "robot_lab_robotiq_202"
 DEFAULT_GROUP_PORT = 7725
 DEFAULT_STATIC_CAM_TOPIC = "static_cam"
 DEFAULT_LLM_URL = "https://ki-toolbox.scc.kit.edu/api/v1/chat/completions"
-DEFAULT_MODEL = "kit.qwen3.5-397b-A17b"
+DEFAULT_MODEL = "kit.minimax-m2.7-229b"
 DEFAULT_MAX_FRAME_AGE = 2.0
 DEFAULT_CAMERA_CLOCK_SKEW = 0.25
 DEFAULT_LATEST_FRAME_WINDOW = 0.15
+DEFAULT_MAX_TOKENS = 4096
+DEFAULT_REQUEST_TIMEOUT = 300.0
 
 
 # Replace this value with the chronological spatial-relation sequence that
@@ -349,6 +351,10 @@ def send_chat_completion(
         "Authorization": f"Bearer {api_key}",
     }
 
+    print(
+        f"Sending LLM request to {llm_url!r} using model {model!r} "
+        f"with max_tokens={max_tokens}..."
+    )
     request = urllib.request.Request(
         llm_url,
         data=json.dumps(payload).encode("utf-8"),
@@ -385,7 +391,8 @@ def send_chat_completion(
         raise RuntimeError(
             "The LLM exhausted its output budget before producing a final "
             f"answer (max_tokens={max_tokens}, reasoning_chars={reasoning_length}). "
-            "Increase --max-tokens."
+            f"Increase --max-tokens (current default is {DEFAULT_MAX_TOKENS}; "
+            "try --max-tokens 8192)."
         )
     raise RuntimeError(
         "The LLM returned no final message content "
@@ -438,10 +445,10 @@ def main() -> None:
             "and use the newest timestamp observed."
         ),
     )
-    parser.add_argument("--request-timeout", type=float, default=60.0)
+    parser.add_argument("--request-timeout", type=float, default=DEFAULT_REQUEST_TIMEOUT)
     parser.add_argument("--llm-url", default=DEFAULT_LLM_URL)
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--max-tokens", type=int, default=2048)
+    parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     parser.add_argument("--jpeg-quality", type=int, default=90)
     parser.add_argument(
         "--input-color-order",

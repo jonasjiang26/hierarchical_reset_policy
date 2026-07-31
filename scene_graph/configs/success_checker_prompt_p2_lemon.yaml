@@ -68,7 +68,7 @@ roll-out_query:
         }
         ......
        {
-                      'relations': [{'relation': 'closed drawer on table'},
+                      'relations': [{'relation': 'closed drawer on table'}, 
                                     {'relation': 'plate on table'}]}}
         }
     
@@ -131,10 +131,8 @@ roll-out_query:
       [close the lower drawer.]
     
     Important rules for task planning:
-    1.If task failed, the drawer should be open. DO NOT use [open the lower drawer.] in reset subskill sequence. 
-    2.If task succeeded, the drawer should be close. need to be opened in reset.
-    3.Task succeeds ONLY if the lemon disappears in spatial relation.
-    4.Pick the most appropriate one of the reset subskill sequences from above examples.
+
+    Pick the most appropriate one of the reset subskill sequences from above examples.
 
     Return exactly one roll-out label and reset subskill sequence
 

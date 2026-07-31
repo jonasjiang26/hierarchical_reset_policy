@@ -10,7 +10,8 @@ DEFAULT_NODE_IP = "141.3.53.25"
 DEFAULT_GROUP_NAME = "robot_lab_robotiq_202"
 DEFAULT_SERVICE_NAME = "scene_graph"
 DEFAULT_GROUP_PORT = 7725
-DEFAULT_PROMPT = "drawer."
+# DEFAULT_PROMPT = "lid. stove. blue pot. carrot."/"stove. blue pan. carrot."
+DEFAULT_PROMPT = "lemon. drawer. plate."
 
 
 def main() -> None:
