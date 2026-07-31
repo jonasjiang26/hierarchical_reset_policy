@@ -23,6 +23,18 @@ CAMERA_TOPICS = (
     DEPTHAI_STATIC_CAM_TOPIC,
     "wrist_cam",
 )
+CAMERA_TOPIC_ALIASES = {
+    ZED_STATIC_CAM_TOPIC: ("zed_cam", "zed_static_cam", "zed_static"),
+    DEPTHAI_STATIC_CAM_TOPIC: ("depthai_static_cam", "depthai_static"),
+    "wrist_cam": ("wrist",),
+}
+# Optional fallback ROI for GroundingDINO/SAM inference. A value of None means
+# use the full camera image. Request payloads can override this per request.
+DEFAULT_SEGMENTATION_PATCHES = {
+    ZED_STATIC_CAM_TOPIC: [400, 240, 868, 623],
+    DEPTHAI_STATIC_CAM_TOPIC: [321, 168, 1000, 600],
+    "wrist_cam": None,
+}
 # Both camera publishers stamp frames with time.time(), i.e. Unix epoch
 # seconds as a float. Allow a small NTP/clock offset, but never process a
 # frame that has spent several seconds in the transport queue.
@@ -49,6 +61,7 @@ class SceneGraphServer:
         self.fused_point_cloud = None
         self.prompt = str
         self.goal_key = ""
+        self.segmentation_patches = dict(DEFAULT_SEGMENTATION_PATCHES)
         self.active_request_id = ""
         self.completed_request_id = ""
         self.spatial_relation = self._empty_spatial_relation()
@@ -255,6 +268,7 @@ class SceneGraphServer:
                 "request_generation": self._request_generation,
                 "prompt": self.prompt,
                 "convert_rgb_to_bgr": convert_rgb_to_bgr,
+                "segmentation_patch": self._segmentation_patch_for_topic(topic),
                 "config_path": config_path,
                 "instances_attr": instances_attr,
                 "T_base_hand": T_base_hand,
@@ -362,6 +376,7 @@ class SceneGraphServer:
                 visualize_masks=False,
                 convert_rgb_to_bgr=job["convert_rgb_to_bgr"],
                 prompt=job["prompt"],
+                segmentation_patch=job["segmentation_patch"],
             )
 
             instances = []
@@ -421,6 +436,7 @@ class SceneGraphServer:
         visualize_masks=False,
         convert_rgb_to_bgr=False,
         prompt=None,
+        segmentation_patch=None,
     ):
         pyzlc.info(f"Received image frame keys: {list(frame.keys())}")
         pyzlc.info(f"Received image frame with timestamp: {frame['timestamp']}")
@@ -437,13 +453,20 @@ class SceneGraphServer:
                 pyzlc.warning("Cannot convert RGB to BGR: image has fewer than 3 channels.")
             else:
                 segmentation_image = np.ascontiguousarray(rgb[:, :, :3][:, :, ::-1])
+        else:
+            segmentation_image = np.ascontiguousarray(segmentation_image[:, :, :3])
+
+        segmentation_image, normalized_patch = self._segmentation_image_patch(
+            segmentation_image,
+            segmentation_patch,
+        )
 
         prompt = self.prompt if prompt is None else prompt
         masks, phrases = self.grounded_sam.segment(self.grounded_sam.model,
                                                     segmentation_image,
                                                     prompt,
                                                     0.3,
-                                                    0.4,
+                                                    0.3,
                                                     "cuda:0",
                                                     with_logits=False)
         pyzlc.info(f"Detected phrases: {phrases}")
@@ -456,10 +479,142 @@ class SceneGraphServer:
         valid_indices = [i for i, phrase in enumerate(phrases) if phrase.strip()]
         phrases = [phrases[i] for i in valid_indices]
         masks = masks[valid_indices]
+        masks = self._clip_masks_to_patch(masks, normalized_patch)
         if visualize_masks:
             self.visualize_masks(segmentation_image, masks, phrases, frame.get("timestamp", "latest"))
         
         return masks, phrases
+
+    def _segmentation_image_patch(self, image, patch):
+        image = np.asarray(image)
+        if image.ndim == 2:
+            image = np.repeat(image[:, :, None], 3, axis=2)
+        elif image.shape[2] == 1:
+            image = np.repeat(image, 3, axis=2)
+        elif image.shape[2] > 3:
+            image = image[:, :, :3]
+        image = np.ascontiguousarray(image)
+
+        normalized_patch = self._normalize_segmentation_patch(
+            patch,
+            width=image.shape[1],
+            height=image.shape[0],
+        )
+        if normalized_patch is None:
+            return image, None
+
+        x_min, y_min, x_max, y_max = normalized_patch
+        patched_image = np.zeros_like(image)
+        patched_image[y_min:y_max, x_min:x_max] = image[y_min:y_max, x_min:x_max]
+        pyzlc.info(
+            "Using segmentation patch "
+            f"x=[{x_min}, {x_max}), y=[{y_min}, {y_max}) "
+            f"inside full image shape {image.shape[:2]}."
+        )
+        return patched_image, normalized_patch
+
+    def _clip_masks_to_patch(self, masks, patch):
+        if patch is None or masks is None:
+            return masks
+
+        clipped_masks = np.asarray(masks).copy()
+        if clipped_masks.ndim == 4 and clipped_masks.shape[1] == 1:
+            mask_height, mask_width = clipped_masks.shape[-2:]
+            keep = np.zeros((mask_height, mask_width), dtype=bool)
+            x_min, y_min, x_max, y_max = patch
+            keep[y_min:y_max, x_min:x_max] = True
+            clipped_masks &= keep[None, None, :, :]
+            return clipped_masks
+
+        if clipped_masks.ndim == 3:
+            mask_height, mask_width = clipped_masks.shape[-2:]
+            keep = np.zeros((mask_height, mask_width), dtype=bool)
+            x_min, y_min, x_max, y_max = patch
+            keep[y_min:y_max, x_min:x_max] = True
+            clipped_masks &= keep[None, :, :]
+            return clipped_masks
+
+        pyzlc.warning(
+            f"Could not clip masks to segmentation patch; unexpected mask shape: {clipped_masks.shape}"
+        )
+        return masks
+
+    def _segmentation_patch_for_topic(self, topic):
+        patches = self.segmentation_patches or {}
+        keys = (topic,) + CAMERA_TOPIC_ALIASES.get(topic, ())
+        for key in keys:
+            if key in patches and patches[key] is not None:
+                return patches[key]
+        if "default" in patches:
+            return patches["default"]
+        return None
+
+    def _request_segmentation_patches(self, request):
+        patches = dict(DEFAULT_SEGMENTATION_PATCHES)
+
+        default_patch = request.get("segmentation_patch")
+        if default_patch is not None:
+            patches["default"] = default_patch
+
+        per_camera_patches = request.get("segmentation_patches")
+        if per_camera_patches is None:
+            return patches
+        if not isinstance(per_camera_patches, dict):
+            raise ValueError("segmentation_patches must be a mapping from camera name to patch.")
+
+        patches.update(per_camera_patches)
+        return patches
+
+    def _normalize_segmentation_patch(self, patch, width, height):
+        if patch is None:
+            return None
+
+        if isinstance(patch, str):
+            patch = [part.strip() for part in patch.split(",")]
+
+        if isinstance(patch, dict):
+            if all(key in patch for key in ("x_min", "y_min", "x_max", "y_max")):
+                values = (
+                    patch["x_min"],
+                    patch["y_min"],
+                    patch["x_max"],
+                    patch["y_max"],
+                )
+            elif all(key in patch for key in ("x", "y", "width", "height")):
+                x_min = patch["x"]
+                y_min = patch["y"]
+                values = (
+                    x_min,
+                    y_min,
+                    float(x_min) + float(patch["width"]),
+                    float(y_min) + float(patch["height"]),
+                )
+            else:
+                raise ValueError(
+                    "Segmentation patch dict must contain x_min/y_min/x_max/y_max "
+                    "or x/y/width/height."
+                )
+        else:
+            values = patch
+
+        if len(values) != 4:
+            raise ValueError(
+                "Segmentation patch must contain four values: "
+                "[x_min, y_min, x_max, y_max]."
+            )
+
+        x_min, y_min, x_max, y_max = (int(round(float(value))) for value in values)
+        x_min = max(0, min(width, x_min))
+        x_max = max(0, min(width, x_max))
+        y_min = max(0, min(height, y_min))
+        y_max = max(0, min(height, y_max))
+
+        if x_max <= x_min or y_max <= y_min:
+            raise ValueError(
+                f"Segmentation patch is empty after clamping to image shape "
+                f"{width}x{height}: {(x_min, y_min, x_max, y_max)}"
+            )
+        return x_min, y_min, x_max, y_max
 
     def visualize_masks(self, rgb, masks, phrases, timestamp):
         try:
@@ -531,6 +686,7 @@ class SceneGraphServer:
                 self.spatial_relation = self._empty_spatial_relation()
                 self.prompt = request.get("prompt", "")
                 self.goal_key = request.get("goal_key", "")
+                self.segmentation_patches = self._request_segmentation_patches(request)
                 self.requested = True
                 self.zed_static_processed_for_request = False
                 self.depthai_static_processed_for_request = False

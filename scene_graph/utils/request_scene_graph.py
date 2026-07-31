@@ -14,6 +14,20 @@ DEFAULT_GROUP_PORT = 7725
 DEFAULT_PROMPT = "lemon. drawer. plate."
 
 
+def parse_patch(value):
+    parts = [part.strip() for part in value.split(",")]
+    if len(parts) != 4:
+        raise argparse.ArgumentTypeError(
+            "patch must be x_min,y_min,x_max,y_max"
+        )
+    try:
+        return [int(round(float(part))) for part in parts]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "patch coordinates must be numbers"
+        ) from exc
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Send a request to the scene graph server.")
     parser.add_argument("--node-ip", default=DEFAULT_NODE_IP)
@@ -25,6 +39,24 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--poll-interval", type=float, default=1.0)
     parser.add_argument("--max-polls", type=int, default=60)
+    parser.add_argument(
+        "--segmentation-patch",
+        type=parse_patch,
+        default=None,
+        help="ROI for all cameras as x_min,y_min,x_max,y_max.",
+    )
+    parser.add_argument(
+        "--static-segmentation-patch",
+        type=parse_patch,
+        default=None,
+        help="ROI for static_cam as x_min,y_min,x_max,y_max.",
+    )
+    parser.add_argument(
+        "--zed-segmentation-patch",
+        type=parse_patch,
+        default=None,
+        help="ROI for zed_depth as x_min,y_min,x_max,y_max.",
+    )
     args = parser.parse_args()
 
     pyzlc.init("scene_graph_requester", args.node_ip, args.group_name, group_port=args.group_port)
@@ -39,6 +71,15 @@ def main() -> None:
         "request_id": request_id,
         "prompt": args.prompt,
     }
+    if args.segmentation_patch is not None:
+        request["segmentation_patch"] = args.segmentation_patch
+    segmentation_patches = {}
+    if args.static_segmentation_patch is not None:
+        segmentation_patches["static_cam"] = args.static_segmentation_patch
+    if args.zed_segmentation_patch is not None:
+        segmentation_patches["zed_depth"] = args.zed_segmentation_patch
+    if segmentation_patches:
+        request["segmentation_patches"] = segmentation_patches
     pyzlc.info(f"Sending request: {request}")
 
     request_fn = getattr(pyzlc, "call", None) or getattr(pyzlc, "zlc_request")

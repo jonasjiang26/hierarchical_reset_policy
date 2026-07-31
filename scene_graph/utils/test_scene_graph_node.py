@@ -27,6 +27,20 @@ def call_scene_graph(service_name, request, timeout, group_name):
     return request_fn(service_name, request, timeout=timeout, group_name=group_name)
 
 
+def parse_patch(value):
+    parts = [part.strip() for part in value.split(",")]
+    if len(parts) != 4:
+        raise argparse.ArgumentTypeError(
+            "patch must be x_min,y_min,x_max,y_max"
+        )
+    try:
+        return [int(round(float(part))) for part in parts]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "patch coordinates must be numbers"
+        ) from exc
+
+
 def main():
     parser = argparse.ArgumentParser(description="Test node for the scene graph server.")
     parser.add_argument("--node-ip", default=DEFAULT_NODE_IP)
@@ -39,6 +53,24 @@ def main():
     parser.add_argument("--poll-interval", type=float, default=1.0)
     parser.add_argument("--max-polls", type=int, default=60)
     parser.add_argument("--include-static-image", action="store_true")
+    parser.add_argument(
+        "--segmentation-patch",
+        type=parse_patch,
+        default=None,
+        help="ROI for all cameras as x_min,y_min,x_max,y_max.",
+    )
+    parser.add_argument(
+        "--static-segmentation-patch",
+        type=parse_patch,
+        default=None,
+        help="ROI for static_cam as x_min,y_min,x_max,y_max.",
+    )
+    parser.add_argument(
+        "--zed-segmentation-patch",
+        type=parse_patch,
+        default=None,
+        help="ROI for zed_depth as x_min,y_min,x_max,y_max.",
+    )
     args = parser.parse_args()
 
     request_id = args.request_id or str(uuid.uuid4())
@@ -46,6 +78,15 @@ def main():
         "request_id": request_id,
         "prompt": args.prompt,
     }
+    if args.segmentation_patch is not None:
+        request["segmentation_patch"] = args.segmentation_patch
+    segmentation_patches = {}
+    if args.static_segmentation_patch is not None:
+        segmentation_patches["static_cam"] = args.static_segmentation_patch
+    if args.zed_segmentation_patch is not None:
+        segmentation_patches["zed_depth"] = args.zed_segmentation_patch
+    if segmentation_patches:
+        request["segmentation_patches"] = segmentation_patches
     if args.include_static_image:
         request["include_static_image"] = True
 
