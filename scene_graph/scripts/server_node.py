@@ -98,6 +98,7 @@ class GroundedDinoVocabDetectionNode:
         key_object,
         keyframe_sample_interval,
         relation_sequence_topic,
+        max_frame_age,
     ):
         pyzlc.init("grounded_dino_vocab_detection", node_ip, group_name, group_port=group_port)
         pyzlc.info("grounded_dino_vocab_detection node initialized.")
@@ -109,6 +110,7 @@ class GroundedDinoVocabDetectionNode:
         self.device = device
         self.key_object = key_object
         self.keyframe_sample_interval = keyframe_sample_interval
+        self.max_frame_age = max_frame_age
         self.relation_sequence_publisher = pyzlc.Publisher(
             relation_sequence_topic,
             group_name,
@@ -129,6 +131,7 @@ class GroundedDinoVocabDetectionNode:
         self._latest_frames = {}
         self._frame_sequences = {topic: 0 for topic in CAMERA_TOPICS}
         self._last_processed_sequences = {topic: 0 for topic in CAMERA_TOPICS}
+        self._last_skip_log_times = {}
         self._running = True
         self._prepare_output_dir()
 
@@ -290,13 +293,26 @@ class GroundedDinoVocabDetectionNode:
             for topic in CAMERA_TOPICS:
                 slot = self._latest_frames.get(topic)
                 if slot is None:
+                    self._log_detection_skip(
+                        topic,
+                        "no camera frame has been received yet",
+                    )
                     continue
                 if slot["sequence"] <= self._last_processed_sequences.get(topic, 0):
                     continue
                 capture_time = slot["capture_time"]
-                if capture_time is not None:
+                if self.max_frame_age > 0 and capture_time is not None:
                     frame_age = now_wall - capture_time
-                    if frame_age > MAX_ACCEPTABLE_FRAME_AGE_SECONDS:
+                    if frame_age > self.max_frame_age:
+                        self._log_detection_skip(
+                            topic,
+                            f"latest frame is stale by local clock: "
+                            f"timestamp={capture_time:.6f}, "
+                            f"age={frame_age:.3f}s, "
+                            f"max_frame_age={self.max_frame_age:.3f}s. "
+                            "If this node runs on a different PC, check clock "
+                            "sync or use --max-frame-age 0.",
+                        )
                         continue
 
                 self._last_processed_sequences[topic] = slot["sequence"]
@@ -314,6 +330,15 @@ class GroundedDinoVocabDetectionNode:
                     }
                 )
         return jobs
+
+    def _log_detection_skip(self, topic, reason, interval=2.0):
+        now = time.monotonic()
+        key = (topic, reason)
+        last_logged = self._last_skip_log_times.get(key, 0.0)
+        if now - last_logged < interval:
+            return
+        self._last_skip_log_times[key] = now
+        pyzlc.warning(f"Skipping {topic} detection: {reason}")
 
     def _detect_frame(self, job):
         image = self._frame_rgb_image(
@@ -1176,6 +1201,16 @@ def parse_args():
     parser.add_argument("--text-threshold", type=float, default=0.3)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument(
+        "--max-frame-age",
+        type=float,
+        default=MAX_ACCEPTABLE_FRAME_AGE_SECONDS,
+        help=(
+            "Reject camera frames older than this many seconds according to "
+            "local wall-clock time. Use 0 to disable this check when running "
+            "on a remote PC without synchronized clocks."
+        ),
+    )
+    parser.add_argument(
         "--key-object",
         default=DEFAULT_KEY_OBJECT,
         help="Object name used to mark appear/disappear keyframes.",
@@ -1200,6 +1235,8 @@ def parse_args():
     args = parser.parse_args()
     if args.keyframe_sample_interval <= 0:
         parser.error("--keyframe-sample-interval must be positive")
+    if args.max_frame_age < 0:
+        parser.error("--max-frame-age cannot be negative")
     if not args.key_object.strip():
         parser.error("--key-object cannot be empty")
     args.key_object = args.key_object.strip()
@@ -1220,5 +1257,6 @@ if __name__ == "__main__":
         key_object=args.key_object,
         keyframe_sample_interval=args.keyframe_sample_interval,
         relation_sequence_topic=args.relation_sequence_topic,
+        max_frame_age=args.max_frame_age,
     )
     pyzlc.spin()

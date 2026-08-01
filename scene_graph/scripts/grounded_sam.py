@@ -14,8 +14,8 @@ from segment_anything import (
 )
 
 
-MODEL_CONFIG_PATH = "/home/jjiang/jing/Grounded-Segment-Anything/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
-MODEL_CHECKPOINT_PATH = "/home/jjiang/jing/Grounded-Segment-Anything/groundingdino_swint_ogc.pth"
+MODEL_CONFIG_PATH = "/home/jjiang/jing/Grounded-Segment-Anything/GroundingDINO/groundingdino/config/GroundingDINO_SwinB.py"
+MODEL_CHECKPOINT_PATH = "/home/jjiang/jing/Grounded-Segment-Anything/groundingdino_swinb_cogcoor.pth"
 SAM_VERSION = "vit_b"
 SAM_CHECKPOINT_PATH = "/home/jjiang/jing/Grounded-Segment-Anything/sam_vit_b_01ec64.pth"
 
