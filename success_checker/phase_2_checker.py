@@ -35,6 +35,7 @@ DEFAULT_NODE_NAME = "phase_2_success_checker"
 DEFAULT_SCENE_GRAPH_SERVICE = "scene_graph"
 DEFAULT_ROLLOUT_TOPIC = "roll-out state"
 DEFAULT_RESET_TOPIC = "reset state"
+DEFAULT_SPATIAL_RELATION_SEQUENCE_TOPIC = "spatial relation sequence"
 DEFAULT_RESET_SEQUENCE_TOPIC = "reset sequence"
 DEFAULT_RESET_FAILURE_TOPIC = "reset checker state"
 DEFAULT_STATIC_CAM_TOPIC = "static_cam"
@@ -61,7 +62,9 @@ class EvaluationSession:
     objective: str | None
     relations: list[dict[str, list[dict[str, Any]]]] = field(default_factory=list)
     stop_event: threading.Event = field(default_factory=threading.Event)
+    relation_event: threading.Event = field(default_factory=threading.Event)
     collector_thread: threading.Thread | None = None
+    ending: bool = False
 
 
 class Phase2SuccessChecker:
@@ -122,9 +125,6 @@ class Phase2SuccessChecker:
         self._latest_frame_age_at_receive: float | None = None
         self._frame_event = threading.Event()
         self._frame_lock = threading.Lock()
-        self._request_fn = getattr(pyzlc, "call", None) or getattr(
-            pyzlc, "zlc_request"
-        )
 
     def static_cam_callback(self, frame: Mapping[str, Any]) -> None:
         """Store the newest fresh static-camera frame for the next LLM request."""
@@ -211,15 +211,11 @@ class Phase2SuccessChecker:
                 )
             self._session = session
 
-        session.collector_thread = threading.Thread(
-            target=self._collect_relations,
-            args=(session,),
-            name=f"phase2-{kind}-collector",
-            daemon=True,
-        )
-        session.collector_thread.start()
         objective_suffix = f" for {objective!r}" if objective else ""
-        pyzlc.info(f"Started {kind} relation collection{objective_suffix}.")
+        pyzlc.info(
+            f"Started {kind} relation collection{objective_suffix}; waiting for "
+            "event-end spatial relation sequence."
+        )
 
     def _end_session(self, kind: str, objective: str | None) -> None:
         with self._session_lock:
@@ -233,15 +229,112 @@ class Phase2SuccessChecker:
                     f"{session.objective!r}."
                 )
                 return
-            self._session = None
+            if session.ending:
+                pyzlc.warning(f"Ignoring duplicate {kind} end signal.")
+                return
             session.stop_event.set()
+            session.ending = True
 
         threading.Thread(
-            target=self._finish_session,
+            target=self._finish_session_after_relation_sequence,
             args=(session,),
             name=f"phase2-{kind}-evaluation",
             daemon=True,
         ).start()
+
+    def spatial_relation_sequence_callback(self, message: Any) -> None:
+        try:
+            payload = self._spatial_relation_sequence_payload(message)
+            payload_kind = self._relation_payload_kind(payload)
+            relation_sequence = self._relation_sequence(payload)
+        except Exception as exc:
+            pyzlc.warning(f"Ignoring invalid spatial relation sequence: {exc}")
+            return None
+
+        with self._session_lock:
+            session = self._session
+            if session is None:
+                pyzlc.warning(
+                    "Received spatial relation sequence without an active "
+                    "Phase-2 session."
+                )
+                return None
+            if session.kind != payload_kind:
+                pyzlc.warning(
+                    f"Ignoring {payload_kind!r} relation sequence while active "
+                    f"session is {session.kind!r}."
+                )
+                return None
+            session.relations = relation_sequence
+            session.relation_event.set()
+        pyzlc.info(
+            f"Received {payload_kind} spatial relation sequence with "
+            f"{len(relation_sequence)} sample(s)."
+        )
+        return None
+
+    def _finish_session_after_relation_sequence(self, session: EvaluationSession) -> None:
+        if not session.relation_event.wait(timeout=self.scene_request_timeout):
+            pyzlc.warning(
+                f"Timed out waiting {self.scene_request_timeout:.1f}s for "
+                f"{session.kind} spatial relation sequence; sending available "
+                f"{len(session.relations)} sample(s) to the LLM."
+            )
+        with self._session_lock:
+            if self._session is session:
+                self._session = None
+        self._finish_session(session)
+
+    def _spatial_relation_sequence_payload(self, message: Any) -> Mapping[str, Any]:
+        if isinstance(message, Mapping):
+            return message
+        if isinstance(message, bytes):
+            message = message.decode("utf-8", errors="replace")
+        if isinstance(message, str):
+            payload = json.loads(message)
+            if isinstance(payload, Mapping):
+                return payload
+        raise TypeError(
+            "spatial relation sequence message must be a mapping or JSON mapping"
+        )
+
+    def _relation_payload_kind(self, payload: Mapping[str, Any]) -> str:
+        raw_kind = (
+            payload.get("kind")
+            or payload.get("state")
+            or payload.get("event")
+            or payload.get("session_kind")
+        )
+        kind = self._signal_text(raw_kind).lower().replace("-", "")
+        if kind in {"rollout", "rolloutstate"}:
+            return "rollout"
+        if kind == "reset":
+            return "reset"
+        raise ValueError(f"Unknown relation sequence kind/state: {raw_kind!r}")
+
+    def _relation_sequence(
+        self,
+        payload: Mapping[str, Any],
+    ) -> list[dict[str, list[dict[str, Any]]]]:
+        raw_sequence = (
+            payload.get("relation_sequence")
+            or payload.get("spatial_relation_sequence")
+            or payload.get("relations_sequence")
+        )
+        if raw_sequence is None:
+            raw_sequence = payload.get("relations")
+        if not isinstance(raw_sequence, list):
+            raise TypeError("relation sequence payload must contain a list")
+
+        relation_sequence: list[dict[str, list[dict[str, Any]]]] = []
+        for index, sample in enumerate(raw_sequence):
+            if not isinstance(sample, Mapping):
+                raise TypeError(f"relation sample {index} is not a mapping")
+            relations = sample.get("relations")
+            if not isinstance(relations, list):
+                raise TypeError(f"relation sample {index} has no relations list")
+            relation_sequence.append({"relations": relations})
+        return relation_sequence
 
     def _collect_relations(self, session: EvaluationSession) -> None:
         request_id: str | None = None
@@ -644,6 +737,10 @@ def main() -> None:
     parser.add_argument("--rollout-topic", default=DEFAULT_ROLLOUT_TOPIC)
     parser.add_argument("--reset-topic", default=DEFAULT_RESET_TOPIC)
     parser.add_argument(
+        "--spatial-relation-sequence-topic",
+        default=DEFAULT_SPATIAL_RELATION_SEQUENCE_TOPIC,
+    )
+    parser.add_argument(
         "--reset-sequence-topic", default=DEFAULT_RESET_SEQUENCE_TOPIC
     )
     parser.add_argument(
@@ -770,6 +867,11 @@ def main() -> None:
         args.reset_topic, checker.reset_state_callback, args.group_name
     )
     pyzlc.register_subscriber_handler(
+        args.spatial_relation_sequence_topic,
+        checker.spatial_relation_sequence_callback,
+        args.group_name,
+    )
+    pyzlc.register_subscriber_handler(
         args.static_cam_topic,
         checker.static_cam_callback,
         args.group_name,
@@ -778,9 +880,9 @@ def main() -> None:
     )
     pyzlc.info(
         f"{args.node_name} subscribed to {args.rollout_topic!r} and "
-        f"{args.reset_topic!r}; receiving images from {args.static_cam_topic!r}; "
-        f"sampling {args.scene_graph_service!r} every "
-        f"{args.sample_interval:.1f}s and publishing rollout reset plans on "
+        f"{args.reset_topic!r}; receiving spatial relation sequences from "
+        f"{args.spatial_relation_sequence_topic!r}; receiving images from "
+        f"{args.static_cam_topic!r}; publishing rollout reset plans on "
         f"{args.reset_sequence_topic!r}."
     )
     pyzlc.spin()

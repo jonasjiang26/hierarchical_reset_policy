@@ -6,185 +6,139 @@ from typing import Any
 
 import pyzlc
 
-from phase_2_checker import (
-    DEFAULT_GROUP_NAME,
-    DEFAULT_GROUP_PORT,
-    DEFAULT_NODE_IP,
-    DEFAULT_RESET_FAILURE_TOPIC,
-    DEFAULT_RESET_SEQUENCE_TOPIC,
-    DEFAULT_RESET_TOPIC,
-    DEFAULT_ROLLOUT_TOPIC,
-    RESET_SUBSKILLS,
-)
+
+DEFAULT_NODE_IP = "141.3.53.25"
+DEFAULT_GROUP_NAME = "robot_lab_robotiq_202"
+DEFAULT_GROUP_PORT = 7725
+DEFAULT_NODE_NAME = "mock_rollout_state_sender"
+DEFAULT_ROLLOUT_TOPIC = "roll-out state"
+DEFAULT_RESET_TOPIC = "reset state"
+DEFAULT_RESET_LABEL = "mock reset"
+ROLLOUT_START_MESSAGE = "roll-out starts"
+ROLLOUT_END_MESSAGE = "roll-out ends"
 
 
-DEFAULT_NODE_NAME = "mock_phase_2_topic_sender"
+def publish_once(publisher: Any, topic: str, message: str) -> None:
+    publisher.publish(message)
+    print(f"Published to {topic!r}: {message!r}", flush=True)
 
 
-def publish_repeated(
+def publish_pulse(
     publisher: Any,
     topic: str,
-    message: Any,
-    repeat: int,
+    message: str,
+    count: int,
     interval: float,
 ) -> None:
-    for index in range(repeat):
-        publisher.publish(message)
-        print(f"Published to {topic!r}: {message!r}", flush=True)
-        if index + 1 < repeat:
+    for index in range(count):
+        publish_once(publisher, topic, message)
+        if index + 1 < count:
             time.sleep(interval)
-
-
-def reset_state_message(subskill: str, event: str, as_dict: bool) -> Any:
-    if as_dict:
-        return {"subskill": subskill, "state": event}
-    return f"{subskill} {event}"
-
-
-def add_common_topic_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--node-ip", default=DEFAULT_NODE_IP)
-    parser.add_argument("--group-name", default=DEFAULT_GROUP_NAME)
-    parser.add_argument("--group-port", type=int, default=DEFAULT_GROUP_PORT)
-    parser.add_argument("--node-name", default=DEFAULT_NODE_NAME)
-    parser.add_argument(
-        "--startup-delay",
-        type=float,
-        default=0.2,
-        help="Seconds to wait after initializing pyzlc before publishing.",
-    )
-    parser.add_argument(
-        "--settle-time",
-        type=float,
-        default=0.2,
-        help="Seconds to wait after the final publish before exiting.",
-    )
-    parser.add_argument(
-        "--repeat",
-        type=int,
-        default=1,
-        help="Publish the same message this many times.",
-    )
-    parser.add_argument(
-        "--interval",
-        type=float,
-        default=0.2,
-        help="Seconds between repeated publishes.",
-    )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Publish mock Phase-2 task/reset messages on the same pyzlc topics "
-            "used by phase_2_checker.py."
+            "Publish mock roll-out lifecycle messages for nodes that listen on "
+            "the 'roll-out state' pyzlc topic."
         )
     )
-    add_common_topic_args(parser)
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    task_parser = subparsers.add_parser(
-        "task-status",
-        help="Publish a rollout/task lifecycle event to the roll-out state topic.",
+    parser.add_argument("--node-ip", default=DEFAULT_NODE_IP)
+    parser.add_argument("--group-name", default=DEFAULT_GROUP_NAME)
+    parser.add_argument("--group-port", type=int, default=DEFAULT_GROUP_PORT)
+    parser.add_argument("--node-name", default=DEFAULT_NODE_NAME)
+    parser.add_argument(
+        "--target",
+        choices=("rollout", "reset", "both"),
+        default="both",
+        help="Which state topic to publish mock lifecycle messages to.",
     )
-    task_parser.add_argument("--topic", default=DEFAULT_ROLLOUT_TOPIC)
-    task_parser.add_argument(
-        "--event",
-        choices=("starts", "ends"),
-        default="starts",
-        help="Task event to publish as 'roll-out <event>'.",
+    parser.add_argument("--rollout-topic", default=DEFAULT_ROLLOUT_TOPIC)
+    parser.add_argument("--reset-topic", default=DEFAULT_RESET_TOPIC)
+    parser.add_argument(
+        "--reset-label",
+        default=DEFAULT_RESET_LABEL,
+        help="Prefix for reset messages; publishes '<label> starts/ends'.",
     )
-
-    reset_parser = subparsers.add_parser(
-        "reset-subskill",
-        help="Publish a reset subskill lifecycle event to the reset state topic.",
-    )
-    reset_parser.add_argument("--topic", default=DEFAULT_RESET_TOPIC)
-    reset_parser.add_argument(
-        "--subskill",
-        default=RESET_SUBSKILLS[0],
-        help="Reset subskill name, with or without a trailing period.",
-    )
-    reset_parser.add_argument(
-        "--event",
-        choices=("starts", "ends"),
-        default="starts",
-        help="Reset event to publish.",
-    )
-    reset_parser.add_argument(
-        "--as-dict",
-        action="store_true",
-        help="Publish {'subskill': ..., 'state': ...} instead of a string.",
-    )
-
-    sequence_parser = subparsers.add_parser(
-        "reset-sequence",
-        help="Publish a mock reset sequence exactly like phase_2_checker output.",
-    )
-    sequence_parser.add_argument("--topic", default=DEFAULT_RESET_SEQUENCE_TOPIC)
-    sequence_parser.add_argument(
-        "--subskill",
-        action="append",
-        dest="subskills",
+    parser.add_argument(
+        "--mode",
+        choices=("start", "end", "cycle"),
+        default="cycle",
         help=(
-            "Reset subskill to include. Repeat for multiple entries. "
-            "Defaults to all phase_2_checker RESET_SUBSKILLS."
+            "start publishes only 'roll-out starts'; end publishes only "
+            "'roll-out ends'; cycle publishes start, waits, then publishes end."
         ),
     )
-
-    checker_parser = subparsers.add_parser(
-        "reset-checker-state",
-        help="Publish a mock reset checker outcome like phase_2_checker output.",
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=10.0,
+        help="Seconds between start and end when --mode cycle is used.",
     )
-    checker_parser.add_argument("--topic", default=DEFAULT_RESET_FAILURE_TOPIC)
-    checker_parser.add_argument(
-        "--outcome",
-        choices=("succeeded", "failed"),
-        default="succeeded",
-        help="Publishes 'reset subskill <outcome>'.",
+    parser.add_argument(
+        "--startup-delay",
+        type=float,
+        default=0.5,
+        help="Seconds to wait after initializing pyzlc before publishing.",
     )
-
+    parser.add_argument(
+        "--settle-time",
+        type=float,
+        default=0.5,
+        help="Seconds to wait after the final publish before exiting.",
+    )
+    parser.add_argument(
+        "--pulse-count",
+        type=int,
+        default=1,
+        help="Publish each lifecycle message this many times.",
+    )
+    parser.add_argument(
+        "--pulse-interval",
+        type=float,
+        default=0.1,
+        help="Seconds between repeated lifecycle message publishes.",
+    )
     return parser
 
 
 def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.group_port <= 0:
         parser.error("--group-port must be positive")
+    if args.duration < 0:
+        parser.error("--duration cannot be negative")
     if args.startup_delay < 0:
         parser.error("--startup-delay cannot be negative")
     if args.settle_time < 0:
         parser.error("--settle-time cannot be negative")
-    if args.repeat <= 0:
-        parser.error("--repeat must be positive")
-    if args.interval < 0:
-        parser.error("--interval cannot be negative")
-    if hasattr(args, "subskill") and not args.subskill.strip():
-        parser.error("--subskill cannot be empty")
-    if hasattr(args, "subskills") and args.subskills is not None:
-        stripped = [subskill.strip() for subskill in args.subskills]
-        if any(not subskill for subskill in stripped):
-            parser.error("--subskill entries cannot be empty")
-        args.subskills = stripped
+    if args.pulse_count <= 0:
+        parser.error("--pulse-count must be positive")
+    if args.pulse_interval < 0:
+        parser.error("--pulse-interval cannot be negative")
+    if not args.rollout_topic.strip():
+        parser.error("--rollout-topic cannot be empty")
+    if not args.reset_topic.strip():
+        parser.error("--reset-topic cannot be empty")
+    if not args.reset_label.strip():
+        parser.error("--reset-label cannot be empty")
 
 
-def message_for_args(args: argparse.Namespace) -> tuple[str, Any]:
-    if args.command == "task-status":
-        return args.topic, f"roll-out {args.event}"
-    if args.command == "reset-subskill":
-        subskill = args.subskill.strip()
-        return args.topic, reset_state_message(subskill, args.event, args.as_dict)
-    if args.command == "reset-sequence":
-        sequence = args.subskills if args.subskills is not None else list(RESET_SUBSKILLS)
-        return args.topic, sequence
-    if args.command == "reset-checker-state":
-        return args.topic, f"reset subskill {args.outcome}"
-    raise ValueError(f"Unsupported command: {args.command!r}")
+def lifecycle_messages(args: argparse.Namespace, event: str) -> list[tuple[str, str]]:
+    messages = []
+    if args.target in {"rollout", "both"}:
+        rollout_message = (
+            ROLLOUT_START_MESSAGE if event == "starts" else ROLLOUT_END_MESSAGE
+        )
+        messages.append((args.rollout_topic, rollout_message))
+    if args.target in {"reset", "both"}:
+        messages.append((args.reset_topic, f"{args.reset_label.strip()} {event}"))
+    return messages
 
 
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     validate_args(parser, args)
-    topic, message = message_for_args(args)
 
     pyzlc.init(
         args.node_name,
@@ -192,16 +146,35 @@ def main() -> None:
         args.group_name,
         group_port=args.group_port,
     )
-    publisher = pyzlc.Publisher(topic, args.group_name)
+    publishers = {}
+    for topic, _ in lifecycle_messages(args, "starts") + lifecycle_messages(args, "ends"):
+        publishers.setdefault(topic, pyzlc.Publisher(topic, args.group_name))
     time.sleep(args.startup_delay)
 
-    publish_repeated(
-        publisher,
-        topic,
-        message,
-        repeat=args.repeat,
-        interval=args.interval,
-    )
+    if args.mode in {"start", "cycle"}:
+        for topic, message in lifecycle_messages(args, "starts"):
+            publish_pulse(
+                publishers[topic],
+                topic,
+                message,
+                count=args.pulse_count,
+                interval=args.pulse_interval,
+            )
+
+    if args.mode == "cycle":
+        print(f"Waiting {args.duration:.3f}s before publishing end signal.", flush=True)
+        time.sleep(args.duration)
+
+    if args.mode in {"end", "cycle"}:
+        for topic, message in lifecycle_messages(args, "ends"):
+            publish_pulse(
+                publishers[topic],
+                topic,
+                message,
+                count=args.pulse_count,
+                interval=args.pulse_interval,
+            )
+
     time.sleep(args.settle_time)
 
 
