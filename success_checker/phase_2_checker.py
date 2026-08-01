@@ -26,7 +26,7 @@ from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROMPT_PATH = (
-    REPO_ROOT / "scene_graph" / "configs" / "success_checker_prompt_p2_berry.yaml"
+    REPO_ROOT / "scene_graph" / "configs" / "success_checker_prompt_p2_lemon.yaml"
 )
 DEFAULT_NODE_IP = "141.3.53.25"
 DEFAULT_GROUP_NAME = "robot_lab_robotiq_202"
@@ -39,7 +39,7 @@ DEFAULT_SPATIAL_RELATION_SEQUENCE_TOPIC = "spatial relation sequence"
 DEFAULT_RESET_SEQUENCE_TOPIC = "reset sequence"
 DEFAULT_RESET_FAILURE_TOPIC = "reset checker state"
 DEFAULT_STATIC_CAM_TOPIC = "static_cam"
-DEFAULT_SCENE_PROMPT = "strawberry. drawer. plate"
+DEFAULT_SCENE_PROMPT = "lemon. drawer. plate"
 DEFAULT_LLM_URL = "https://ki-toolbox.scc.kit.edu/api/v1/chat/completions"
 DEFAULT_MODEL = "kit.minimax-m2.7-229b"
 DEFAULT_FRAME_TIMEOUT = 5.0
@@ -50,8 +50,8 @@ DEFAULT_MAX_TOKENS = 512
 DEFAULT_LLM_TIMEOUT = 300.0
 RESET_SUBSKILLS = (
      "open the lower drawer.",
-     "put the strawberry from plate back in drawer.",
-     "put the strawberry from table back in drawer.",
+     "put the lemon from plate back in drawer.",
+     "put the lemon from table back in drawer.",
      "close the lower drawer."
 )
 

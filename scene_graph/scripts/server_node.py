@@ -16,9 +16,9 @@ from instance import TableInstance
 
 
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs"
-ZED_STATIC_CAM_TOPIC = "zed_depth"
+ZED_STATIC_CAM_TOPIC = "zed_depth_3hz"
 ZED_STATIC_CAM_CONFIG = CONFIG_DIR / "eye_to_hand_zed.yaml"
-DEPTHAI_STATIC_CAM_TOPIC = "static_cam"
+DEPTHAI_STATIC_CAM_TOPIC = "static_cam_3hz"
 DEPTHAI_STATIC_CAM_CONFIG = CONFIG_DIR / "eye_to_hand.yaml"
 CAMERA_TOPICS = (
     ZED_STATIC_CAM_TOPIC,
@@ -43,12 +43,12 @@ CAMERA_COLOR_CONVERSIONS = {
     ZED_STATIC_CAM_TOPIC: False,
     DEPTHAI_STATIC_CAM_TOPIC: True,
 }
-DETECTION_HZ = 3.0
+DETECTION_HZ = 2.0
 DETECTION_PERIOD_SECONDS = 1.0 / DETECTION_HZ
 MAX_ACCEPTABLE_FRAME_AGE_SECONDS = 2.0
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[2] / "outputs" / "grounding_dino_rgbd"
 DEFAULT_KEY_OBJECT = "lemon"
-DEFAULT_KEYFRAME_SAMPLE_INTERVAL_SECONDS = 1.5
+DEFAULT_KEYFRAME_SAMPLE_INTERVAL_SECONDS = 2
 DETECTION_LOG_COLUMNS = (
     "state",
     "state_message",
@@ -131,12 +131,17 @@ class GroundedDinoVocabDetectionNode:
         self._latest_frames = {}
         self._frame_sequences = {topic: 0 for topic in CAMERA_TOPICS}
         self._last_processed_sequences = {topic: 0 for topic in CAMERA_TOPICS}
+        self._last_processed_capture_times = {topic: None for topic in CAMERA_TOPICS}
+        self._event_start_monotonic = 0.0
+        self._event_start_capture_times = {topic: None for topic in CAMERA_TOPICS}
         self._last_skip_log_times = {}
+        self._last_camera_log_times = {}
         self._running = True
         self._prepare_output_dir()
 
         pyzlc.info(f"Forcing {ZED_STATIC_CAM_TOPIC} subscriber to use TCP transport.")
-        pyzlc.get_node(group_name).subscriber_manager.local_ip = ""
+        self._pyzlc_node = pyzlc.get_node(group_name)
+        self._pyzlc_node.subscriber_manager.local_ip = ""
 
         for topic in CAMERA_TOPICS:
             pyzlc.register_subscriber_handler(
@@ -183,6 +188,7 @@ class GroundedDinoVocabDetectionNode:
                     "received_at": time.monotonic(),
                     "capture_time": self._camera_capture_time(frame),
                 }
+                self._log_camera_frame_received(topic, frame, sequence)
             return None
 
         return callback
@@ -229,12 +235,21 @@ class GroundedDinoVocabDetectionNode:
             self._active_state_message = message
             if was_inactive:
                 self._last_processed_sequences = dict(self._frame_sequences)
+                self._event_start_monotonic = time.monotonic()
+                self._event_start_capture_times = {
+                    topic: self._latest_frames.get(topic, {}).get("capture_time")
+                    for topic in CAMERA_TOPICS
+                }
+                self._last_processed_capture_times = dict(
+                    self._event_start_capture_times
+                )
+                self._reset_camera_subscribers()
         print(
-            f"[GroundingDINO] {state_name} started; detecting {self.prompt!r} at "
-            f"{DETECTION_HZ:.1f} Hz.",
+            f"[GroundingDINO] {state_name} started; saving RGBD frames at "
+            f"{DETECTION_HZ:.1f} Hz. Vocab detection runs after the event ends.",
             flush=True,
         )
-        pyzlc.info(f"{state_name} detection started from state message: {message!r}")
+        pyzlc.info(f"{state_name} RGBD sampling started from state message: {message!r}")
 
     def _stop_detection(self, state_name, message):
         session = None
@@ -249,8 +264,8 @@ class GroundedDinoVocabDetectionNode:
             else:
                 self._active_state = None
                 self._active_state_message = ""
-        print(f"[GroundingDINO] {state_name} ended; detection stopped.", flush=True)
-        pyzlc.info(f"{state_name} detection stopped from state message: {message!r}")
+        print(f"[GroundingDINO] {state_name} ended; RGBD sampling stopped.", flush=True)
+        pyzlc.info(f"{state_name} RGBD sampling stopped from state message: {message!r}")
         if session is not None:
             try:
                 self._write_keyframes_for_session(session)
@@ -271,11 +286,10 @@ class GroundedDinoVocabDetectionNode:
                     self._inflight_jobs += 1
                 try:
                     saved_paths = self._save_rgbd_frame(job)
-                    names = self._detect_frame(job)
-                    self._record_detection(job, names, saved_paths)
-                    self._print_detection_result(job, names)
+                    self._record_rgbd_sample(job, saved_paths)
+                    self._print_rgbd_sample_result(job, saved_paths)
                 except Exception as exc:
-                    pyzlc.warning(f"Detection failed for {job['topic']}: {exc}")
+                    pyzlc.warning(f"RGBD sampling failed for {job['topic']}: {exc}")
                 finally:
                     with self._state_condition:
                         self._inflight_jobs -= 1
@@ -300,7 +314,39 @@ class GroundedDinoVocabDetectionNode:
                     continue
                 if slot["sequence"] <= self._last_processed_sequences.get(topic, 0):
                     continue
+                if slot["received_at"] <= self._event_start_monotonic:
+                    self._log_detection_skip(
+                        topic,
+                        "latest frame was received before the current event started",
+                    )
+                    continue
                 capture_time = slot["capture_time"]
+                start_capture_time = self._event_start_capture_times.get(topic)
+                if (
+                    capture_time is not None
+                    and start_capture_time is not None
+                    and capture_time <= start_capture_time
+                ):
+                    self._log_detection_skip(
+                        topic,
+                        f"camera timestamp has not advanced since event start: "
+                        f"latest={capture_time:.6f}, "
+                        f"event_start_latest={start_capture_time:.6f}",
+                    )
+                    continue
+                last_capture_time = self._last_processed_capture_times.get(topic)
+                if (
+                    capture_time is not None
+                    and last_capture_time is not None
+                    and capture_time <= last_capture_time
+                ):
+                    self._log_detection_skip(
+                        topic,
+                        f"camera timestamp did not advance since last processed "
+                        f"frame: latest={capture_time:.6f}, "
+                        f"last_processed={last_capture_time:.6f}",
+                    )
+                    continue
                 if self.max_frame_age > 0 and capture_time is not None:
                     frame_age = now_wall - capture_time
                     if frame_age > self.max_frame_age:
@@ -316,6 +362,7 @@ class GroundedDinoVocabDetectionNode:
                         continue
 
                 self._last_processed_sequences[topic] = slot["sequence"]
+                self._last_processed_capture_times[topic] = capture_time
                 jobs.append(
                     {
                         "active_state": self._active_state,
@@ -340,12 +387,57 @@ class GroundedDinoVocabDetectionNode:
         self._last_skip_log_times[key] = now
         pyzlc.warning(f"Skipping {topic} detection: {reason}")
 
-    def _detect_frame(self, job):
-        image = self._frame_rgb_image(
-            job["frame"],
-            convert_rgb_to_bgr=job["convert_rgb_to_bgr"],
+    def _log_camera_frame_received(self, topic, frame, sequence, interval=2.0):
+        now = time.monotonic()
+        last_logged = self._last_camera_log_times.get(topic, 0.0)
+        if now - last_logged < interval:
+            return
+        self._last_camera_log_times[topic] = now
+        pyzlc.info(
+            f"Camera heartbeat {topic}: seq={sequence}, "
+            f"timestamp={frame.get('timestamp')!r}, "
+            f"shape={frame.get('width')}x{frame.get('height')}x"
+            f"{frame.get('channels')}"
         )
-        image, _ = self._segmentation_image_patch(image, job["segmentation_patch"])
+
+    def _reset_camera_subscribers(self):
+        manager = getattr(self._pyzlc_node, "subscriber_manager", None)
+        subscriber_dict = getattr(manager, "subscriber_dict", None)
+        if subscriber_dict is None:
+            pyzlc.warning(
+                "Cannot reset camera subscribers: pyzlc subscriber_dict is unavailable."
+            )
+            return
+
+        for topic in CAMERA_TOPICS:
+            subscriber = subscriber_dict.get(topic)
+            if subscriber is None:
+                pyzlc.warning(f"Cannot reset {topic}: subscriber is not registered.")
+                continue
+            urls = list(getattr(subscriber, "sub_urls", []))
+            if not urls:
+                pyzlc.warning(f"Cannot reset {topic}: no subscriber URLs are known.")
+                continue
+            try:
+                for url in urls:
+                    subscriber._socket.disconnect(url)
+                subscriber.sub_urls.clear()
+                time.sleep(0.02)
+                for url in urls:
+                    subscriber.connect(url)
+                pyzlc.info(
+                    f"Reset {topic} subscriber connection(s): "
+                    f"reconnected to {len(urls)} publisher URL(s)."
+                )
+            except Exception as exc:
+                pyzlc.warning(f"Could not reset {topic} subscriber: {exc}")
+
+    def _detect_saved_record(self, record):
+        rgb, _ = self._load_rgbd_npz(record["rgbd_path"])
+        image, _ = self._segmentation_image_patch(
+            rgb,
+            DEFAULT_SEGMENTATION_PATCHES.get(record["camera"]),
+        )
         _, image_tensor = self.grounded_sam.load_image(image)
         _, phrases = self.grounded_sam.get_grounding_output(
             self.grounded_sam.model,
@@ -358,22 +450,20 @@ class GroundedDinoVocabDetectionNode:
         )
         return [phrase.strip() for phrase in phrases if phrase and phrase.strip()]
 
-    def _print_detection_result(self, job, names):
-        unique_names = []
-        seen = set()
-        for name in names:
-            key = name.lower().rstrip(".")
-            if key in seen:
-                continue
-            unique_names.append(name)
-            seen.add(key)
-
+    def _print_detection_result(self, record):
+        unique_names = self._unique_detection_names(record["detected_objects"])
         label = ", ".join(unique_names) if unique_names else "none"
-        timestamp = job["capture_time"]
-        timestamp_text = f"{timestamp:.6f}" if timestamp is not None else "unknown"
         message = (
-            f"[GroundingDINO][{job['active_state']}][{job['topic']}] "
-            f"seq={job['sequence']} timestamp={timestamp_text} detected: {label}"
+            f"[GroundingDINO][{record['state']}][{record['camera']}] "
+            f"seq={record['sequence']} timestamp={record['timestamp']} detected: {label}"
+        )
+        print(message, flush=True)
+        pyzlc.info(message)
+
+    def _print_rgbd_sample_result(self, job, saved_paths):
+        message = (
+            f"[RGBD][{job['active_state']}][{job['topic']}] "
+            f"seq={job['sequence']} timestamp={saved_paths['timestamp']} saved."
         )
         print(message, flush=True)
         pyzlc.info(message)
@@ -445,9 +535,7 @@ class GroundedDinoVocabDetectionNode:
         image = np.array(image, dtype=np.uint16, copy=True)
         Image.fromarray(image).save(path)
 
-    def _record_detection(self, job, names, saved_paths):
-        unique_names = self._unique_detection_names(names)
-        rows = []
+    def _record_rgbd_sample(self, job, saved_paths):
         with self._state_lock:
             for state_name in job["active_state_names"]:
                 session = self._active_sessions.get(state_name)
@@ -461,25 +549,42 @@ class GroundedDinoVocabDetectionNode:
                     "sequence": job["sequence"],
                     "timestamp": saved_paths["timestamp"],
                     "time_value": self._timestamp_value(saved_paths["timestamp"]),
-                    "detected_objects": list(unique_names),
+                    "detected_objects": [],
                     "rgb_path": str(saved_paths["rgb_path"]),
                     "depth_path": str(saved_paths["depth_path"] or ""),
                     "rgbd_path": str(saved_paths["rgbd_path"]),
                 }
                 session["records"].append(record)
-                rows.append(
-                    {
-                        "state": record["state"],
-                        "state_message": record["state_message"],
-                        "camera": record["camera"],
-                        "sequence": record["sequence"],
-                        "timestamp": record["timestamp"],
-                        "detected_objects": ";".join(record["detected_objects"]),
-                        "rgb_path": record["rgb_path"],
-                        "depth_path": record["depth_path"],
-                        "rgbd_path": record["rgbd_path"],
-                    }
+
+    def _detect_objects_for_records(self, records):
+        for index, record in enumerate(records, start=1):
+            try:
+                names = self._detect_saved_record(record)
+                record["detected_objects"] = self._unique_detection_names(names)
+                self._print_detection_result(record)
+            except Exception as exc:
+                record["detected_objects"] = []
+                pyzlc.warning(
+                    f"Post-event vocab detection failed for {record['camera']} "
+                    f"timestamp={record['timestamp']} sample={index}/{len(records)}: {exc}"
                 )
+        return records
+
+    def _write_detection_records(self, records):
+        rows = [
+            {
+                "state": record["state"],
+                "state_message": record["state_message"],
+                "camera": record["camera"],
+                "sequence": record["sequence"],
+                "timestamp": record["timestamp"],
+                "detected_objects": ";".join(record["detected_objects"]),
+                "rgb_path": record["rgb_path"],
+                "depth_path": record["depth_path"],
+                "rgbd_path": record["rgbd_path"],
+            }
+            for record in records
+        ]
         if not rows:
             return
         with self._io_lock:
@@ -495,12 +600,23 @@ class GroundedDinoVocabDetectionNode:
         records = list(session["records"])
         if not records:
             pyzlc.warning(
-                f"No detection records available for {session['state']} "
+                f"No RGBD samples available for {session['state']} "
                 f"session {session['session_id']}."
             )
             self._publish_spatial_relation_sequence(session, [])
             return
 
+        pyzlc.info(
+            f"Running post-event GroundingDINO vocab detection on {len(records)} "
+            f"RGBD sample(s) for {session['state']} session {session['session_id']}."
+        )
+        print(
+            f"[GroundingDINO][{session['state']}] running vocab detection on "
+            f"{len(records)} saved RGBD sample(s).",
+            flush=True,
+        )
+        records = self._detect_objects_for_records(records)
+        self._write_detection_records(records)
         selected_records = self._select_keyframes(records)
         session_dir = self.keyframes_dir / session["session_id"]
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -705,10 +821,11 @@ class GroundedDinoVocabDetectionNode:
             rgb,
             DEFAULT_SEGMENTATION_PATCHES.get(row["camera"]),
         )
+        prompt = self._keyframe_prompt(row)
         masks, phrases = self.grounded_sam.segment(
             self.grounded_sam.model,
             segmentation_image,
-            self.prompt,
+            prompt,
             self.box_threshold,
             self.text_threshold,
             self.device,
@@ -720,6 +837,10 @@ class GroundedDinoVocabDetectionNode:
             normalized_patch,
         )
         if masks is None or len(phrases) == 0:
+            pyzlc.warning(
+                f"SAM/GroundingDINO found no masks for keyframe {keyframe_index} "
+                f"{row['camera']} timestamp={row['timestamp']} prompt={prompt!r}."
+            )
             return []
 
         depth_uint16 = self._depth_image_for_png(depth)
@@ -757,6 +878,11 @@ class GroundedDinoVocabDetectionNode:
                 debug=False,
                 show_range=False,
             )
+            self._log_projected_instance(
+                instance,
+                row=row,
+                keyframe_index=keyframe_index,
+            )
             instances.append(instance)
 
         pyzlc.info(
@@ -764,6 +890,30 @@ class GroundedDinoVocabDetectionNode:
             f"keyframe {keyframe_index} {row['camera']} timestamp={row['timestamp']}."
         )
         return instances
+
+    def _keyframe_prompt(self, row):
+        detected_objects = [
+            name.strip()
+            for name in str(row["detected_objects"]).split(";")
+            if name.strip()
+        ]
+        if not detected_objects:
+            return self.prompt
+        return ". ".join(detected_objects) + "."
+
+    def _log_projected_instance(self, instance, row, keyframe_index):
+        mask_pixels = int(instance.mask_array().sum())
+        masked_depth = instance.segment_depth()
+        depth_pixels = int(np.count_nonzero(masked_depth))
+        pcd = getattr(instance, "segmented_point_cloud", None)
+        point_count = 0 if pcd is None else len(pcd.points)
+        pyzlc.info(
+            f"Keyframe {keyframe_index} {row['camera']} "
+            f"timestamp={row['timestamp']} instance={instance.name!r}: "
+            f"mask_pixels={mask_pixels}, "
+            f"masked_depth_nonzero={depth_pixels}, "
+            f"projected_points={point_count}"
+        )
 
     def _load_rgbd_npz(self, rgbd_path):
         with np.load(rgbd_path, allow_pickle=False) as data:
@@ -933,6 +1083,19 @@ class GroundedDinoVocabDetectionNode:
         )
         print(header, flush=True)
         pyzlc.info(header)
+        detected_objects = []
+        for row in group_rows:
+            detected_objects.extend(
+                name
+                for name in str(row["detected_objects"]).split(";")
+                if name
+            )
+        detected_line = (
+            "  detected objects: "
+            + (", ".join(self._unique_detection_names(detected_objects)) if detected_objects else "none")
+        )
+        print(detected_line, flush=True)
+        pyzlc.info(detected_line)
         object_line = "  objects: " + (", ".join(objects) if objects else "none")
         print(object_line, flush=True)
         pyzlc.info(object_line)
