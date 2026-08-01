@@ -938,7 +938,10 @@ class GroundedDinoVocabDetectionNode:
         with self._io_lock:
             if self.images_dir.exists():
                 shutil.rmtree(self.images_dir)
+            if self.keyframes_dir.exists():
+                shutil.rmtree(self.keyframes_dir)
             self.images_dir.mkdir(parents=True, exist_ok=True)
+            self.keyframes_dir.mkdir(parents=True, exist_ok=True)
             with self.detection_log_path.open(
                 "w",
                 encoding="utf-8",
@@ -947,7 +950,8 @@ class GroundedDinoVocabDetectionNode:
                 writer = csv.DictWriter(csv_file, fieldnames=DETECTION_LOG_COLUMNS)
                 writer.writeheader()
         pyzlc.info(
-            "Cleared transient RGBD images and detection records for the next event."
+            "Cleared transient RGBD images, keyframes, and detection records "
+            "for the next event."
         )
 
     def _select_keyframes(self, records):
