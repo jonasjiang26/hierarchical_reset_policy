@@ -1,1 +1,5 @@
 state,state_message,camera,sequence,timestamp,detected_objects,rgb_path,depth_path,rgbd_path
+roll-out,roll-out starts,zed_depth_3hz,357,1785618502.661393,lemon;plate;drawer,,,/home/jjiang/jing/hierarchical_reset_policy/outputs/grounding_dino_rgbd/images/zed_depth_3hz/1785618502_661393_rgbd.npz
+roll-out,roll-out starts,static_cam_3hz,358,1785618502.664099,lemon;plate;drawer,,,/home/jjiang/jing/hierarchical_reset_policy/outputs/grounding_dino_rgbd/images/static_cam_3hz/1785618502_664099_rgbd.npz
+roll-out,roll-out starts,zed_depth_3hz,358,1785618503.661130,lemon;plate;drawer,,,/home/jjiang/jing/hierarchical_reset_policy/outputs/grounding_dino_rgbd/images/zed_depth_3hz/1785618503_661130_rgbd.npz
+roll-out,roll-out starts,static_cam_3hz,359,1785618503.664206,lemon;plate;drawer,,,/home/jjiang/jing/hierarchical_reset_policy/outputs/grounding_dino_rgbd/images/static_cam_3hz/1785618503_664206_rgbd.npz

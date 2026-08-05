@@ -136,6 +136,8 @@ class GroundedSAM:
             masks = masks.detach().cpu().numpy().astype(bool)
         finally:
             self._reset_predictor_image()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         return masks, phrases
 

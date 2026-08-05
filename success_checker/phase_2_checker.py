@@ -39,19 +39,19 @@ DEFAULT_SPATIAL_RELATION_SEQUENCE_TOPIC = "spatial relation sequence"
 DEFAULT_RESET_SEQUENCE_TOPIC = "reset sequence"
 DEFAULT_RESET_FAILURE_TOPIC = "reset checker state"
 DEFAULT_STATIC_CAM_TOPIC = "static_cam"
-DEFAULT_SCENE_PROMPT = "lemon. drawer. plate"
+DEFAULT_SCENE_PROMPT = "lemon. drawer. plate" #"lemon. drawer. plate"
 DEFAULT_LLM_URL = "https://ki-toolbox.scc.kit.edu/api/v1/chat/completions"
-DEFAULT_MODEL = "kit.minimax-m2.7-229b"
+DEFAULT_MODEL = "kit.minimax-m2.7-229b" #"kit.qwen3.5-397b-A17b" "kit.minimax-m2.7-229b"
 DEFAULT_FRAME_TIMEOUT = 5.0
 DEFAULT_MAX_FRAME_AGE = 2.0
 DEFAULT_CAMERA_CLOCK_SKEW = 0.25
 DEFAULT_LATEST_FRAME_WINDOW = 0.15
-DEFAULT_MAX_TOKENS = 512
+DEFAULT_MAX_TOKENS = 8192
 DEFAULT_LLM_TIMEOUT = 300.0
 RESET_SUBSKILLS = (
      "open the lower drawer.",
-     "put the lemon from plate back in drawer.",
-     "put the lemon from table back in drawer.",
+     "put the lemon from lower drawer back on plate.",
+     "put the lemon from table back on plate.",
      "close the lower drawer."
 )
 
