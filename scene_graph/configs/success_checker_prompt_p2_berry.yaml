@@ -23,8 +23,8 @@ system: |
     state has not been reached. And tell me why
   - Plan a reset subtask sequence by picking only necessary subskill from following available subskills:
      [open the lower drawer.]
-     [put the strawberry from plate back in drawer.]
-     [put the strawberry from table back in drawer.]
+     [put strawberry back in the lower drawer.]
+     [put strawberry from table back in drawer.]
      [close the lower drawer.]
     
   Reset judgment:
@@ -75,7 +75,7 @@ roll-out_query:
 
     The reset subskill sequence will be:
     [open the lower drawer.
-     put the strawberry from plate back in drawer.
+     put strawberry back in the lower drawer.
      close the lower drawer.]
 
 
@@ -119,7 +119,7 @@ roll-out_query:
                                     {'relation': 'plate on table'}]}}
         }
       The reset subskill sequence will be:
-      [put the strawberry from plate back in drawer.
+      [put strawberry back in the lower drawer.
       close the lower drawer.]
     
     Important rules for task planning:
@@ -138,7 +138,7 @@ reset_query:
     The robot has released the gripper and finished one reset subskill.
 
     successful reset examples:
-    Subskill: "put the strawberry from plate back in drawer."
+    Subskill: "put strawberry back in the lower drawer."
       spatial relation sequence:
        {
                       'relations': [{'relation': 'strawberry on plate'},

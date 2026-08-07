@@ -26,7 +26,7 @@ from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROMPT_PATH = (
-    REPO_ROOT / "scene_graph" / "configs" / "success_checker_prompt_p2_lemon.yaml"
+    REPO_ROOT / "scene_graph" / "configs" / "success_checker_prompt_p2_berry.yaml"
 )
 DEFAULT_NODE_IP = "141.3.53.25"
 DEFAULT_GROUP_NAME = "robot_lab_robotiq_202"
@@ -39,7 +39,7 @@ DEFAULT_SPATIAL_RELATION_SEQUENCE_TOPIC = "spatial relation sequence"
 DEFAULT_RESET_SEQUENCE_TOPIC = "reset sequence"
 DEFAULT_RESET_FAILURE_TOPIC = "reset checker state"
 DEFAULT_STATIC_CAM_TOPIC = "static_cam"
-DEFAULT_SCENE_PROMPT = "lemon. drawer. plate" #"lemon. drawer. plate"
+DEFAULT_SCENE_PROMPT = "strawberry. drawer. plate" #"strawberry. drawer. plate"
 DEFAULT_LLM_URL = "https://ki-toolbox.scc.kit.edu/api/v1/chat/completions"
 DEFAULT_MODEL = "kit.minimax-m2.7-229b" #"kit.qwen3.5-397b-A17b" "kit.minimax-m2.7-229b"
 DEFAULT_FRAME_TIMEOUT = 5.0
@@ -50,8 +50,8 @@ DEFAULT_MAX_TOKENS = 8192
 DEFAULT_LLM_TIMEOUT = 300.0
 RESET_SUBSKILLS = (
      "open the lower drawer.",
-     "put the lemon from lower drawer back on plate.",
-     "put the lemon from table back on plate.",
+     "put strawberry back in the lower drawer.",
+     "put the strawberry from table back in drawer.",
      "close the lower drawer."
 )
 
@@ -458,7 +458,59 @@ class Phase2SuccessChecker:
 
     @staticmethod
     def _extract_reset_sequence(llm_response: str) -> list[str]:
-        response_text = llm_response.lower()
+        response_text = Phase2SuccessChecker._strip_reasoning_blocks(llm_response)
+        response_text = Phase2SuccessChecker._rollout_answer_region(response_text)
+
+        for match in re.finditer(r"\[([^\[\]]+)\]", response_text, flags=re.DOTALL):
+            sequence = Phase2SuccessChecker._collapse_repeated_sequence(
+                Phase2SuccessChecker._find_reset_subskills(match.group(1))
+            )
+            if sequence:
+                return sequence
+
+        sequence = Phase2SuccessChecker._find_reset_subskills(response_text)
+        return Phase2SuccessChecker._collapse_repeated_sequence(sequence)
+
+    @staticmethod
+    def _strip_reasoning_blocks(llm_response: str) -> str:
+        response_text = re.sub(
+            r"<(think|reasoning)\b[^>]*>.*?</\1\s*>",
+            "",
+            llm_response,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        closing_tags = list(
+            re.finditer(
+                r"</(?:think|reasoning)\s*>",
+                response_text,
+                flags=re.IGNORECASE,
+            )
+        )
+        if closing_tags:
+            response_text = response_text[closing_tags[-1].end():]
+        return re.sub(
+            r"<(?:think|reasoning)\b[^>]*>.*",
+            "",
+            response_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+    @staticmethod
+    def _rollout_answer_region(response_text: str) -> str:
+        outcome_matches = list(
+            re.finditer(
+                r"\btask\s+(?:succeeded|failed)\b",
+                response_text,
+                flags=re.IGNORECASE,
+            )
+        )
+        if outcome_matches:
+            return response_text[outcome_matches[-1].start():]
+        return response_text
+
+    @staticmethod
+    def _find_reset_subskills(text: str) -> list[str]:
+        response_text = text.lower()
         matches: list[tuple[int, str]] = []
         for subskill in RESET_SUBSKILLS:
             search_text = subskill.rstrip(".").lower()
@@ -471,6 +523,19 @@ class Phase2SuccessChecker:
                 start = index + len(search_text)
         matches.sort(key=lambda match: match[0])
         return [subskill for _, subskill in matches]
+
+    @staticmethod
+    def _collapse_repeated_sequence(sequence: list[str]) -> list[str]:
+        for sequence_length in range(1, len(sequence) // 2 + 1):
+            if len(sequence) % sequence_length:
+                continue
+            candidate = sequence[:sequence_length]
+            if all(
+                sequence[index:index + sequence_length] == candidate
+                for index in range(0, len(sequence), sequence_length)
+            ):
+                return candidate
+        return sequence
 
     def _build_messages(
         self,
