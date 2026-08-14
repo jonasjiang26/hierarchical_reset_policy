@@ -35,11 +35,19 @@ SPATIAL_RELATION_SEQUENCE_TOPIC = "spatial relation sequence"
 ROLLOUT_START_MESSAGE = "roll-out starts"
 ROLLOUT_END_MESSAGE = "roll-out ends"
 
-DEFAULT_PROMPT = "strawberry. drawer. plate."
+DEFAULT_PROMPT = "carrot. blue pan. stove."
+#image patch range for drawer
+# DEFAULT_SEGMENTATION_PATCHES = {
+#     ZED_STATIC_CAM_TOPIC: [400, 240, 820, 626],
+#     DEPTHAI_STATIC_CAM_TOPIC: [321, 168, 1000, 600],
+# }
+
+#image patch range for kitchen
 DEFAULT_SEGMENTATION_PATCHES = {
-    ZED_STATIC_CAM_TOPIC: [400, 240, 820, 626],
-    DEPTHAI_STATIC_CAM_TOPIC: [321, 168, 1000, 600],
+    ZED_STATIC_CAM_TOPIC: [313, 265, 921, 638],
+    DEPTHAI_STATIC_CAM_TOPIC: [300, 215, 929, 719],
 }
+
 CAMERA_COLOR_CONVERSIONS = {
     ZED_STATIC_CAM_TOPIC: False,
     DEPTHAI_STATIC_CAM_TOPIC: True,
@@ -48,7 +56,7 @@ DETECTION_HZ = 0.5
 DETECTION_PERIOD_SECONDS = 1.0 / DETECTION_HZ
 MAX_ACCEPTABLE_FRAME_AGE_SECONDS = 2.0
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[2] / "outputs" / "grounding_dino_rgbd"
-DEFAULT_KEY_OBJECT = "strawberry"
+DEFAULT_KEY_OBJECT = "carrot"
 DEFAULT_KEYFRAME_SAMPLE_INTERVAL_SECONDS = 3
 SAVE_RGBD_IMAGE_PREVIEWS = False
 SAVE_KEYFRAME_FILES = False
@@ -1136,7 +1144,7 @@ class GroundedDinoVocabDetectionNode:
 
                 subject_name = heuristics.spatial_relation_instance_name(instance)
                 target_name = heuristics.spatial_relation_instance_name(chosen_instance)
-                relation = f"{subject_name} is in {target_name}"
+                relation = f"{subject_name} in {target_name}"
                 if relation not in seen_relations:
                     spatial_relations.append(relation)
                     seen_relations.add(relation)

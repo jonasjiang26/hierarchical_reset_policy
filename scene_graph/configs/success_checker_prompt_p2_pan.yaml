@@ -22,8 +22,12 @@ system: |
   - Reply "task failed" when the robot has finished but the specified
     state has not been reached. And tell me why
   - Plan a reset subtask sequence by picking only necessary subskill from following available subskills:
-     [put blue pan back in place.]
-     [put carrot back in sink.]
+     [put carrot back in sink]
+     [put lid back in place]
+     [put pan back in place from stove]
+     [put pan back in place from table]
+
+
     
   Reset judgment:
   - Reply "reset subskill succeeded" when the specified reset state has been restored
@@ -60,20 +64,20 @@ roll-out_query:
         }
         ......
         {
-                      'relations': [{'relation': 'blue pan in stove'},
+                      'relations': [{'relation': 'blue pan in/on stove'},
                                     {'relation': 'carrot in stove'},
                                     {'relation': 'stove on table'},
         }
         ......
         {
-                      'relations': [{'relation': 'blue pan in stove'},
-                                    {'relation': 'carrot on blue pan'},
+                      'relations': [{'relation': 'blue pan in/on stove'},
+                                    {'relation': 'carrot in/on blue pan'},
                                     {'relation': 'stove on table'},
         }
     
     The reset subskill sequence will be:
     [put carrot back in sink.
-     put blue pan back in place.]
+     put pan back in place from stove.]
 
 
     failed roll-out examples:
@@ -86,20 +90,37 @@ roll-out_query:
         ......
 
        {
-                      'relations': [{'relation': 'blue pan in stove'},
+                      'relations': [{'relation': 'blue pan in/on stove'},
                                     {'relation': 'carrot in stove'},
                                     {'relation': 'stove on table'}],
         }
 
       The reset subskill sequence will be:
-      [put blue pan back in place.]
+      [put pan back in place from stove.]
 
-  
+    failed roll-out examples:
+      spatial relation sequence:
+       {
+                      'relations': [{'relation': 'blue pan on table'},
+                                    {'relation': 'carrot in stove'},
+                                    {'relation': 'stove on table'}],
+        }
+        ......
+
+       {
+                      'relations': [{'relation': 'blue pan on table'},
+                                    {'relation': 'carrot in stove'},
+                                    {'relation': 'stove on table'}],
+        }
+
+      The reset subskill sequence will be:
+      [put pan back in place from table.]
+
     Important rules for task planning:
-
-    2. Pick the most appropriate one of the reset subskill sequences from above examples.
+    "carrot in stove" equals to "carrot in sink", because the sink is part of stove.
 
     Return exactly one roll-out label and reset subskill sequence
+    DO NOT give any explanation
 
 
 
@@ -115,35 +136,32 @@ reset_query:
     Subskill: "put carrot back in sink."
       spatial relation sequence:
         {
-                      'relations': [{'relation': 'blue pan in stove'},
-                                    {'relation': 'carrot on blue pan'},
+                      'relations': [{'relation': 'blue pan in/on stove'},
+                                    {'relation': 'carrot in/on blue pan'},
                                     {'relation': 'stove on table'},
-                                    {'relation': 'lid on table'}]}}
         }
         ......
         {
-                      'relations': [{'relation': 'blue pan in stove'},
+                      'relations': [{'relation': 'blue pan in/on stove'},
                                     {'relation': 'carrot in stove'},
                                     {'relation': 'stove on table'},
-                                    {'relation': 'lid on table'}]}}
         }
 
-    Subskill: "put blue pan back in place."
+    Subskill: "put pan back in place from stove."
       spatial relation sequence:
         {
-                      'relations': [{'relation': 'blue pan in stove'},
+                      'relations': [{'relation': 'blue pan in/on stove'},
                                     {'relation': 'carrot in stove'},
                                     {'relation': 'stove on table'},
-                                    {'relation': 'lid on table'}]}}
         }
         ......
         {
                       'relations': [{'relation': 'blue pan on table'},
                                     {'relation': 'carrot in stove'},
                                     {'relation': 'stove on table'},
-                                    {'relation': 'lid on table'}]}}
         }
 
     Judge the reset comparing the chronological spatial-relation sequence with above examples.
-
-    Return exactly one reset label
+    "carrot in stove" equals to "carrot in sink", because the sink is part of stove.
+    "put pan back in place from stove." should put pan back on table
+    Return exactly one reset label with no explanation

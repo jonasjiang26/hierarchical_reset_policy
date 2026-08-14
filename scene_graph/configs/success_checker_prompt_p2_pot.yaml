@@ -22,9 +22,10 @@ system: |
   - Reply "task failed" when the robot has finished but the specified
     state has not been reached. And tell me why
   - Plan a reset subtask sequence by picking only necessary subskill from following available subskills:
-     [put blue pot back in place.]
-     [put carrot back in sink.]
-     [put lid back in place.]
+      [put pot back in place from stove]
+      [put pot back in place from table]
+      [put carrot back in sink.]
+      [put lid back in place.]
     
   Reset judgment:
   - Reply "reset subskill succeeded" when the specified reset state has been restored
@@ -83,7 +84,7 @@ roll-out_query:
     The reset subskill sequence will be:
     [put lid back in place.
      put carrot back in sink.
-     put blue pot back in place.]
+     put pot back in place from stove.]
 
 
     failed roll-out examples:
@@ -104,7 +105,7 @@ roll-out_query:
         }
 
       The reset subskill sequence will be:
-      [put blue pot back in place.]
+      [put pot back in place from stove.]
 
       spatial relation sequence:
        {
@@ -136,7 +137,7 @@ roll-out_query:
         }
       The reset subskill sequence will be:
       [put carrot back in sink.
-      put blue pot back in place.]
+      put pot back in place from stove.]
 
     
     Important rules for task planning:
@@ -185,7 +186,7 @@ reset_query:
                                     {'relation': 'lid on table'}]}}
         }
 
-    Subskill: "put blue pot back in place."
+    Subskill: "put pot back in place from stove."
       spatial relation sequence:
         {
                       'relations': [{'relation': 'blue pot on stove'},
